@@ -644,6 +644,8 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 
     consteval vector<info> tokens_of(info);
     consteval token_kind token_kind_of(info);
+    consteval string_view token_spelling_of(info);
+    consteval u8string_view u8token_spelling_of(info);
 
     // Accumulates a token sequence in which the pieces added with += are
     // separated by the given separator, a comma by default.

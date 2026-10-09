@@ -438,6 +438,9 @@ static tree eval_tokens_of (location_t, const constexpr_ctx *, tree,
 			    reflect_kind, bool *, tree *, tree);
 static tree eval_token_kind_of (location_t, const constexpr_ctx *, tree,
 				reflect_kind, bool *, tree *, tree, tree);
+static tree eval_token_spelling_of (location_t, const constexpr_ctx *, tree,
+				    reflect_kind, bool *, tree *, tree, tree,
+				    tree);
 static tree reflect_current_scope (location_t, const constexpr_ctx *, tree,
 				   bool *, const char *);
 
@@ -3782,6 +3785,9 @@ eval_display_string_of (location_t loc, const constexpr_ctx *ctx, tree r,
   pp.set_format_postprocessor (pp_format_postprocessor (refpp)->clone ());
   if (r == unknown_type_node)
     pp_printf (&pp, "<null reflection>");
+  else if (kind == REFLECT_TOKENS)
+    /* The same text as token_spelling_of.  */
+    token_sequence_spelling (&pp, r);
   else if (TYPE_P (r))
     pp_printf (&pp, "%T", r);
   else if (kind == REFLECT_PARM)
@@ -8463,6 +8469,14 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
     case METAFN_TOKEN_KIND_OF:
       return eval_token_kind_of (loc, ctx, h, kind, non_constant_p,
 				 jump_target, rettype, fun);
+    case METAFN_TOKEN_SPELLING_OF:
+      return eval_token_spelling_of (loc, ctx, h, kind, non_constant_p,
+				     jump_target, char_type_node, rettype,
+				     fun);
+    case METAFN_U8TOKEN_SPELLING_OF:
+      return eval_token_spelling_of (loc, ctx, h, kind, non_constant_p,
+				     jump_target, char8_type_node, rettype,
+				     fun);
     case METAFN_DEFINE_AGGREGATE:
       return eval_define_aggregate (loc, ctx, h, hvec, call, non_constant_p);
     case METAFN_IS_VOID_TYPE:
@@ -10258,6 +10272,42 @@ eval_token_kind_of (location_t loc, const constexpr_ctx *ctx, tree r,
   else
     k = classify_token (&(*toks)[0]);
   return build_int_cst (ret_type, k);
+}
+
+/* Process std::meta::{,u8}token_spelling_of.
+   Returns: a string_view or u8string_view containing the spelling of the
+   tokens of the token sequence reflected by r, separated by single spaces,
+   respectively encoded with the ordinary literal encoding or with UTF-8.
+   Literals are spelled as written, after macro expansion.
+   Throws: meta::exception unless r represents a token sequence, or if the
+   spelling is not representable.  */
+
+static tree
+eval_token_spelling_of (location_t loc, const constexpr_ctx *ctx, tree r,
+			reflect_kind kind, bool *non_constant_p,
+			tree *jump_target, tree elt_type, tree ret_type,
+			tree fun)
+{
+  get_token_sequence_tokens (loc, ctx, r, kind, false, non_constant_p,
+			     jump_target, fun);
+  if (*jump_target || *non_constant_p)
+    return NULL_TREE;
+  pretty_printer pp;
+  token_sequence_spelling (&pp, r);
+  tree str = get_string_literal (pp_formatted_text (&pp), elt_type);
+  if (str == NULL_TREE)
+    return throw_exception (loc, ctx,
+			    elt_type == char_type_node
+			    ? G_("token_spelling_of not representable in "
+				 "ordinary literal encoding")
+			    : G_("u8token_spelling_of not representable in "
+				 "UTF-8"),
+			    fun, non_constant_p, jump_target);
+  releasing_vec args (make_tree_vector_single (str));
+  tree ret = build_special_member_call (NULL_TREE, complete_ctor_identifier,
+					&args, ret_type, LOOKUP_NORMAL,
+					tf_warning_or_error);
+  return build_cplus_new (ret_type, ret, tf_warning_or_error);
 }
 
 /* Process std::meta::is_token_sequence.
