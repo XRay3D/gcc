@@ -443,6 +443,8 @@ static tree eval_token_spelling_of (location_t, const constexpr_ctx *, tree,
 				    tree);
 static tree eval_token_value_of (location_t, const constexpr_ctx *, tree,
 				 reflect_kind, bool *, tree *, tree);
+static tree eval_token_location_of (location_t, const constexpr_ctx *, tree,
+				    reflect_kind, bool *, tree *, tree, tree);
 static tree reflect_current_scope (location_t, const constexpr_ctx *, tree,
 				   bool *, const char *);
 
@@ -2712,6 +2714,13 @@ eval_source_location_of (location_t loc, tree r, reflect_kind kind,
     rloc = DECL_SOURCE_LOCATION (r);
   else if (eval_is_annotation (r, kind) == boolean_true_node)
     rloc = EXPR_LOCATION (TREE_VALUE (TREE_VALUE (r)));
+  else if (kind == REFLECT_TOKENS
+	   && !vec_safe_is_empty (TOKEN_SEQUENCE_TOKENS (r)))
+    /* The location of the first token; for a token from a macro
+       expansion, the location of the expansion.  */
+    rloc = linemap_resolve_location (line_table,
+				     (*TOKEN_SEQUENCE_TOKENS (r))[0].location,
+				     LRK_MACRO_EXPANSION_POINT, NULL);
   tree decl = NULL_TREE, field = NULL_TREE;
   if (rloc != UNKNOWN_LOCATION)
     {
@@ -8482,6 +8491,9 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
     case METAFN_TOKEN_VALUE_OF:
       return eval_token_value_of (loc, ctx, h, kind, non_constant_p,
 				  jump_target, fun);
+    case METAFN_TOKEN_LOCATION_OF:
+      return eval_token_location_of (loc, ctx, h, kind, non_constant_p,
+				     jump_target, rettype, fun);
     case METAFN_DEFINE_AGGREGATE:
       return eval_define_aggregate (loc, ctx, h, hvec, call, non_constant_p);
     case METAFN_IS_VOID_TYPE:
@@ -10460,6 +10472,24 @@ eval_token_value_of (location_t loc, const constexpr_ctx *ctx, tree r,
     return throw_exception (loc, ctx, "the value of the literal cannot be "
 			    "computed", fun, non_constant_p, jump_target);
   return ret;
+}
+
+/* Process std::meta::token_location_of.
+   Returns: the source location of the first token of the token sequence
+   reflected by r, as std::meta::source_location_of gives it.
+   Throws: meta::exception unless r represents a non-empty token
+   sequence.  */
+
+static tree
+eval_token_location_of (location_t loc, const constexpr_ctx *ctx, tree r,
+			reflect_kind kind, bool *non_constant_p,
+			tree *jump_target, tree ret_type, tree fun)
+{
+  get_token_sequence_tokens (loc, ctx, r, kind, true, non_constant_p,
+			     jump_target, fun);
+  if (*jump_target || *non_constant_p)
+    return NULL_TREE;
+  return eval_source_location_of (loc, r, kind, ret_type);
 }
 
 /* Process std::meta::is_token_sequence.
