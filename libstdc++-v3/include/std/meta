@@ -602,6 +602,41 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     consteval vector<info> annotations_of(info);
     consteval vector<info> annotations_of_with_type(info, info);
 
+#ifdef __GXX_TOKEN_INJECTION__
+    // Token sequences (P3294, -ftoken-injection)
+    consteval bool is_token_sequence(info);
+    consteval bool is_empty_token_sequence(info);
+
+    // Accumulates a token sequence in which the pieces added with += are
+    // separated by the given separator, a comma by default.
+    struct list_builder
+    {
+      consteval list_builder() { }
+      consteval list_builder(info __separator) : _M_separator(__separator) { }
+
+      consteval operator info() const { return _M_tokens; }
+
+      consteval void
+      operator+=(info __next_tokens)
+      {
+	if (is_empty_token_sequence(__next_tokens))
+	  return;
+	if (_M_first)
+	  {
+	    _M_tokens = __next_tokens;
+	    _M_first = false;
+	  }
+	else
+	  _M_tokens = ^^{ \{_M_tokens} \{_M_separator} \{__next_tokens} };
+      }
+
+    private:
+      bool _M_first = true;
+      info _M_tokens = ^^{};
+      info _M_separator = ^^{,};
+    };
+#endif // __GXX_TOKEN_INJECTION__
+
     consteval access_context
     access_context::via(info __cls) const
     {

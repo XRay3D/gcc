@@ -149,6 +149,7 @@ static constexpr cp_feature_info cp_feature_table[] =
   { "cxx_return_type_deduction", cxx14 },
   { "cxx_variable_templates", cxx14 },
   { "modules", &flag_modules },
+  { "token_injection", &flag_token_injection },
 };
 
 /* Register C++ language features for __has_{feature,extension}.  */
@@ -206,6 +207,7 @@ cp_tree_size (enum tree_code code)
     case BASELINK:		return sizeof (tree_baselink);
     case TEMPLATE_PARM_INDEX:	return sizeof (template_parm_index);
     case DEFERRED_PARSE:	return sizeof (tree_deferred_parse);
+    case TOKEN_SEQUENCE:	return sizeof (tree_token_sequence);
     case DEFERRED_NOEXCEPT:	return sizeof (tree_deferred_noexcept);
     case OVERLOAD:		return sizeof (tree_overload);
     case STATIC_ASSERT:         return sizeof (tree_static_assert);
@@ -625,6 +627,7 @@ cp_common_init_ts (void)
   MARK_TS_COMMON (BASELINK);
   MARK_TS_COMMON (OVERLOAD);
   MARK_TS_COMMON (TEMPLATE_PARM_INDEX);
+  MARK_TS_COMMON (TOKEN_SEQUENCE);
 
   /* New decls.  */
   MARK_TS_DECL_COMMON (TEMPLATE_DECL);
@@ -699,6 +702,7 @@ cp_common_init_ts (void)
   MARK_TS_EXP (SPACESHIP_EXPR);
   MARK_TS_EXP (SPLICE_EXPR);
   MARK_TS_EXP (REFLECT_EXPR);
+  MARK_TS_EXP (TOKEN_SEQUENCE_EXPR);
 
   /* Fold expressions.  */
   MARK_TS_EXP (BINARY_LEFT_FOLD_EXPR);

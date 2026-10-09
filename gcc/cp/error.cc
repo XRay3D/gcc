@@ -3331,12 +3331,23 @@ dump_expr (cxx_pretty_printer *pp, tree t, int flags)
 	}
       break;
 
+    case TOKEN_SEQUENCE_EXPR:
+      pp_string (pp, "^^{ ");
+      token_sequence_spelling (pp, TOKEN_SEQUENCE_EXPR_TOKENS (t));
+      pp_string (pp, " }");
+      break;
+
     case REFLECT_EXPR:
       {
 	tree h = REFLECT_EXPR_HANDLE (t);
 	bool any;
 	switch (REFLECT_EXPR_KIND (t))
 	  {
+	  case REFLECT_TOKENS:
+	    pp_string (pp, "^^{ ");
+	    token_sequence_spelling (pp, h);
+	    pp_string (pp, " }");
+	    break;
 	  case REFLECT_ANNOTATION:
 	    pp_string (pp, "^^[[=");
 	    pp->set_padding (pp_none);

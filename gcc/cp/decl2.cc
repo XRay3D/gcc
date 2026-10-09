@@ -3148,6 +3148,10 @@ min_vis_expr_r (tree *tp, int *walk_subtrees, void *data)
 	  tpvis = VISIBILITY_ANON;
 	  *walk_subtrees = 0;
 	  break;
+	case REFLECT_TOKENS:
+	  /* A token sequence is compared and mangled structurally.  */
+	  *walk_subtrees = 0;
+	  break;
 	case REFLECT_OBJECT:
 	  r = get_base_address (r);
 	  gcc_fallthrough ();

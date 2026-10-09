@@ -4349,6 +4349,7 @@ cp_tree_equal (tree t1, tree t2)
     case SSA_NAME:
     case USING_DECL:
     case DEFERRED_PARSE:
+    case TOKEN_SEQUENCE:
     case NAMESPACE_DECL:
       return false;
 
@@ -6112,6 +6113,7 @@ cp_walk_subtrees (tree *tp, int *walk_subtrees_p, walk_tree_fn func,
 	WALK_SUBTREE (CLASS_PLACEHOLDER_TEMPLATE (t));
       /* Fall through.  */
     case DEFERRED_PARSE:
+    case TOKEN_SEQUENCE:
     case TEMPLATE_TEMPLATE_PARM:
     case BOUND_TEMPLATE_TEMPLATE_PARM:
     case UNBOUND_CLASS_TEMPLATE:
@@ -7028,4 +7030,7 @@ cp_tree_cc_tests ()
 #endif /* #if CHECKING_P */
 
 
+/* gt-cp-tree.h marks the tokens of a TOKEN_SEQUENCE, so it needs the
+   definition of cp_token.  */
+#include "parser.h"
 #include "gt-cp-tree.h"

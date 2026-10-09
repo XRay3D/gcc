@@ -899,11 +899,23 @@ cxx_pretty_printer::unary_expression (tree t)
       pp_cxx_cast_expression (this, TREE_OPERAND (t, 0));
       break;
 
+    case TOKEN_SEQUENCE_EXPR:
+      pp_cxx_ws_string (this, "^^{");
+      token_sequence_spelling (this, TOKEN_SEQUENCE_EXPR_TOKENS (t));
+      pp_cxx_ws_string (this, "}");
+      break;
+
     case REFLECT_EXPR:
       {
 	pp_cxx_ws_string (this, "^^");
 	tree h = REFLECT_EXPR_HANDLE (t);
-	if (DECL_P (h))
+	if (REFLECT_EXPR_KIND (t) == REFLECT_TOKENS)
+	  {
+	    pp_cxx_ws_string (this, "{");
+	    token_sequence_spelling (this, h);
+	    pp_cxx_ws_string (this, "}");
+	  }
+	else if (DECL_P (h))
 	  declaration (h);
 	else if (TYPE_P (h))
 	  type_id (h);
@@ -1199,6 +1211,7 @@ cxx_pretty_printer::expression (tree t)
     case NOEXCEPT_EXPR:
     case UNARY_PLUS_EXPR:
     case REFLECT_EXPR:
+    case TOKEN_SEQUENCE_EXPR:
       unary_expression (t);
       break;
 

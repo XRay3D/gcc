@@ -9410,6 +9410,11 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
     case REFLECT_EXPR:
       return t;
 
+    case TOKEN_SEQUENCE_EXPR:
+      r = eval_token_sequence_expr (ctx, t, non_constant_p, overflow_p,
+				    jump_target);
+      break;
+
     case PARM_DECL:
       if (lval && !TYPE_REF_P (TREE_TYPE (t)))
 	{
@@ -12025,6 +12030,24 @@ potential_constant_expression_1 (tree t, bool want_rval, bool strict, bool now,
     case DEBUG_BEGIN_STMT:
     case REFLECT_EXPR:
       return true;
+
+    case TOKEN_SEQUENCE_EXPR:
+      {
+	tree interps = TOKEN_SEQUENCE_EXPR_INTERPOLATORS (t);
+	for (int i = 0; i < TREE_VEC_LENGTH (interps); ++i)
+	  {
+	    tree op = TREE_VEC_ELT (TREE_VEC_ELT (interps, i), 2);
+	    if (TREE_CODE (op) == TREE_VEC)
+	      {
+		for (int j = 0; j < TREE_VEC_LENGTH (op); ++j)
+		  if (!RECUR (TREE_VEC_ELT (op, j), rval))
+		    return false;
+	      }
+	    else if (!RECUR (op, rval))
+	      return false;
+	  }
+	return true;
+      }
 
     case RETURN_EXPR:
       if (!RECUR (TREE_OPERAND (t, 0), any))

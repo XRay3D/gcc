@@ -6576,6 +6576,7 @@ trees_out::core_vals (tree t)
     case ARGUMENT_PACK_SELECT:  /* Transient during instantiation.  */
     case DEFERRED_PARSE:	/* Expanded upon completion of
 				   outermost class.  */
+    case TOKEN_SEQUENCE:	/* Not streamable (yet).  */
     case IDENTIFIER_NODE:	/* Streamed specially.  */
     case BINDING_VECTOR:		/* Only in namespace-scope symbol
 				   table.  */
@@ -7158,6 +7159,7 @@ trees_in::core_vals (tree t)
 
     case ARGUMENT_PACK_SELECT:
     case DEFERRED_PARSE:
+    case TOKEN_SEQUENCE:
     case IDENTIFIER_NODE:
     case BINDING_VECTOR:
     case SSA_NAME:

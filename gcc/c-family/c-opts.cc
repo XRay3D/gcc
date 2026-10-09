@@ -1273,6 +1273,9 @@ c_common_post_options (const char **pfilename)
     error ("%<-freflection%> only supported with %<-std=c++26%> or "
 	   "%<-std=gnu++26%>");
 
+  if (flag_token_injection && !flag_reflection)
+    error ("%<-ftoken-injection%> requires %<-freflection%>");
+
   if (num_in_fnames > 1)
     error ("too many filenames given; type %<%s %s%> for usage",
 	   progname, "--help");

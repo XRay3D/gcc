@@ -2361,6 +2361,10 @@ freflection
 C++ ObjC++ Var(flag_reflection) Init(0)
 Enable experimental C++26 Reflection.
 
+ftoken-injection
+C++ ObjC++ Var(flag_token_injection) Init(0)
+Enable experimental token sequences and token injection (P3294); requires -freflection.
+
 freplace-objc-classes
 ObjC ObjC++ LTO Var(flag_replace_objc_classes)
 Used in Fix-and-Continue mode to indicate that object files may be swapped in at runtime.

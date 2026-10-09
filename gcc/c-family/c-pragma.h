@@ -296,6 +296,7 @@ extern void pragma_lex_discard_to_eol ();
 /* This is not actually available to pragma parsers.  It's merely a
    convenient location to declare this function for c-lex, after
    having enum cpp_ttype declared.  */
+extern const char *c_token_spelling (location_t);
 extern enum cpp_ttype c_lex_with_flags (tree *, location_t *, unsigned char *,
 					int);
 

@@ -589,6 +589,17 @@ DEFTREECODE (TU_LOCAL_ENTITY, "tu_local_entity", tcc_exceptional, 0)
 /* C++26 reflection expression.  */
 DEFTREECODE (REFLECT_EXPR, "reflect_expr", tcc_expression, 1)
 
+/* A token sequence (P3294, -ftoken-injection): holds a vector of tokens.
+   It is the handle of a REFLECT_EXPR of kind REFLECT_TOKENS.  */
+DEFTREECODE (TOKEN_SEQUENCE, "token_sequence", tcc_exceptional, 0)
+
+/* A token-sequence expression ^^{ ... } with interpolators that are
+   evaluated when the expression is constant-evaluated.  Operand 0 is
+   the TOKEN_SEQUENCE holding the written tokens with a CPP_TOKEN_VALUE
+   placeholder for each interpolator, operand 1 is a TREE_VEC of
+   interpolators, see TOKEN_SEQUENCE_EXPR_INTERPOLATORS.  */
+DEFTREECODE (TOKEN_SEQUENCE_EXPR, "token_sequence_expr", tcc_expression, 2)
+
 /* Represents the std::meta::info type.  */
 DEFTREECODE (META_TYPE, "meta_type", tcc_type, 0)
 

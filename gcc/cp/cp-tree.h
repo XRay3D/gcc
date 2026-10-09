@@ -1417,6 +1417,43 @@ struct GTY (()) tree_deferred_parse {
   vec<tree, va_gc> *instantiations;
 };
 
+/* The tokens of a TOKEN_SEQUENCE (-ftoken-injection).  */
+
+#define TOKEN_SEQUENCE_TOKENS(NODE) \
+  (((struct tree_token_sequence *)TOKEN_SEQUENCE_CHECK (NODE))->tokens)
+
+struct cp_token;
+struct GTY (()) tree_token_sequence {
+  /* tree_common rather than tree_base so that generic tree walkers can
+     look at TREE_TYPE (which is NULL_TREE) of the handle of a
+     REFLECT_EXPR.  */
+  struct tree_common common;
+  vec<cp_token, va_gc> *tokens;
+};
+
+/* In a TOKEN_SEQUENCE_EXPR, the TOKEN_SEQUENCE holding the tokens as
+   written, with a CPP_TOKEN_VALUE placeholder token where each
+   interpolator appeared.  */
+#define TOKEN_SEQUENCE_EXPR_TOKENS(NODE) \
+  TREE_OPERAND (TOKEN_SEQUENCE_EXPR_CHECK (NODE), 0)
+
+/* In a TOKEN_SEQUENCE_EXPR, a TREE_VEC of interpolators in order of
+   appearance.  Each is a TREE_VEC of three elements: an INTEGER_CST holding
+   a token_interpolator_kind, an INTEGER_CST holding the index of the
+   placeholder token, and the operand expression (for TIK_IDENTIFIER a
+   TREE_VEC of operand expressions).  */
+#define TOKEN_SEQUENCE_EXPR_INTERPOLATORS(NODE) \
+  TREE_OPERAND (TOKEN_SEQUENCE_EXPR_CHECK (NODE), 1)
+
+/* The kinds of interpolators in a token sequence.  */
+enum token_interpolator_kind {
+  TIK_IDENTIFIER,	/* \[ e1, e2, ... ]: an identifier from strings.  */
+  TIK_SPLICE,		/* \[: r :]: a splice of the reflection r.  */
+  TIK_TOKENS,		/* \{ ts }: the tokens of the token sequence ts.  */
+  TIK_VALUE,		/* \val(e): the value e.  */
+  TIK_STRING		/* \str(s): a string literal with the text s.  */
+};
+
 
 #define DEFERRED_NOEXCEPT_PATTERN(NODE) \
   (((struct tree_deferred_noexcept *)DEFERRED_NOEXCEPT_CHECK (NODE))->pattern)
@@ -1942,7 +1979,10 @@ enum reflect_kind : addr_space_t {
   /* The reflection represents a direct base relationship.  */
   REFLECT_BASE,
   /* The reflection represents an annotation.  */
-  REFLECT_ANNOTATION
+  REFLECT_ANNOTATION,
+  /* The reflection represents a token sequence (-ftoken-injection).
+     The handle is a TOKEN_SEQUENCE.  */
+  REFLECT_TOKENS
 };
 
 /* The reflect_kind of a REFLECT_EXPR.  */
@@ -2020,6 +2060,7 @@ enum cp_tree_node_structure_enum {
   TS_CP_BASELINK,
   TS_CP_TEMPLATE_DECL,
   TS_CP_DEFERRED_PARSE,
+  TS_CP_TOKEN_SEQUENCE,
   TS_CP_DEFERRED_NOEXCEPT,
   TS_CP_STATIC_ASSERT,
   TS_CP_ARGUMENT_PACK_SELECT,
@@ -2043,6 +2084,8 @@ union GTY((desc ("cp_tree_node_structure (&%h)"),
   struct tree_baselink GTY ((tag ("TS_CP_BASELINK"))) baselink;
   struct tree_template_decl GTY ((tag ("TS_CP_TEMPLATE_DECL"))) template_decl;
   struct tree_deferred_parse GTY ((tag ("TS_CP_DEFERRED_PARSE"))) deferred_parse;
+  struct tree_token_sequence GTY ((tag ("TS_CP_TOKEN_SEQUENCE")))
+    token_sequence;
   struct tree_deferred_noexcept GTY ((tag ("TS_CP_DEFERRED_NOEXCEPT"))) deferred_noexcept;
   struct lang_identifier GTY ((tag ("TS_CP_IDENTIFIER"))) identifier;
   struct tree_static_assert GTY ((tag ("TS_CP_STATIC_ASSERT")))
@@ -9534,6 +9577,13 @@ extern tree reflection_mangle_prefix (tree, char [3]);
 extern void check_consteval_only_fn (tree);
 extern bool reflection_function_template_p (const_tree) ATTRIBUTE_PURE;
 extern void dump_data_member_spec (pretty_printer *, tree);
+extern tree make_token_sequence (vec<cp_token, va_gc> *);
+extern tree finish_token_sequence_expr (location_t, tree, tree);
+extern tree eval_token_sequence_expr (const constexpr_ctx *, tree, bool *,
+				      bool *, tree *);
+extern void token_sequence_spelling (pretty_printer *, tree);
+extern bool token_sequence_p (const_tree) ATTRIBUTE_PURE;
+extern hashval_t hash_token_sequence (tree, hashval_t);
 
 /* Inline bodies.  */
 

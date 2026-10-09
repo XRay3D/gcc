@@ -428,8 +428,13 @@ extern machine_mode c_default_pointer_mode;
 /* A token type for pre-parsed primary-expression (lambda- or statement-).  */
 #define CPP_PREPARSED_EXPR ((enum cpp_ttype) (CPP_DECLTYPE + 1))
 
+/* A token type for a value interpolated into a token sequence with
+   \val(...) or \[: ... :] (-ftoken-injection).  The value of the token
+   is the constant, or a REFLECT_EXPR.  */
+#define CPP_TOKEN_VALUE ((enum cpp_ttype) (CPP_PREPARSED_EXPR + 1))
+
 /* The number of token types, including C++-specific ones.  */
-#define N_CP_TTYPES ((int) (CPP_PREPARSED_EXPR + 1))
+#define N_CP_TTYPES ((int) (CPP_TOKEN_VALUE + 1))
 
 /* Disable mask.  Keywords are disabled if (reswords[i].disable &
    mask) is _true_.  Thus for keywords which are present in all

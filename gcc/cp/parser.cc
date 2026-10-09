@@ -804,7 +804,10 @@ cp_lexer_new_main (void)
 	 it is changed into
 	 CPP_NUMBER CPP_COMMA CPP_EMBED CPP_COMMA CPP_NUMBER.  */
     recheck:
-      if (tok->type == CPP_NUMBER
+      /* With -ftoken-injection, a token sequence must see the tokens as
+	 written, so don't fold them into CPP_EMBED.  */
+      if (!flag_token_injection
+	  && tok->type == CPP_NUMBER
 	  && (raw_data_tokens & 1) == 0
 	  && TREE_CODE (tok->u.value) == INTEGER_CST
 	  && TREE_TYPE (tok->u.value) == integer_type_node
@@ -1681,6 +1684,9 @@ cp_lexer_print_token (FILE * stream, cp_token *token)
     "KEYWORD",
     "TEMPLATE_ID",
     "NESTED_NAME_SPECIFIER",
+    "DECLTYPE",
+    "PREPARSED_EXPR",
+    "TOKEN_VALUE",
   };
 
   /* For some tokens, print the associated data.  */
@@ -6661,6 +6667,32 @@ cp_parser_primary_expression (cp_parser *parser,
       return (cp_expr (token->u.value, token->location, token->flags & DECIMAL_INT)
 	      .maybe_add_location_wrapper ());
 
+    case CPP_TOKEN_VALUE:
+      /* A value interpolated into a token sequence with \val(...) or
+	 \[: ... :] (-ftoken-injection), now being parsed as part of
+	 injected tokens.  */
+      token = cp_lexer_consume_token (parser->lexer);
+      if (token->u.value == NULL_TREE)
+	{
+	  error_at (token->location, "unevaluated interpolator in injected "
+		    "tokens");
+	  return error_mark_node;
+	}
+      return cp_expr (token->u.value, token->location);
+
+    case CPP_OTHER:
+      if (token->u.value == NULL_TREE)
+	{
+	  /* A lone backslash (-ftoken-injection) outside of a token
+	     sequence.  */
+	  error_at (token->location, "stray %<\\%> in program; an interpolator "
+		    "can only appear in a token sequence");
+	  cp_lexer_consume_token (parser->lexer);
+	  return error_mark_node;
+	}
+      cp_parser_error (parser, "expected primary-expression");
+      return error_mark_node;
+
     case CPP_CHAR_USERDEF:
     case CPP_CHAR16_USERDEF:
     case CPP_CHAR32_USERDEF:
@@ -10084,6 +10116,204 @@ cp_parser_reflection_name (cp_parser *parser)
   return decl;
 }
 
+/* Parse an interpolator in a token sequence (-ftoken-injection), after
+   the introducing backslash at BS_LOC has been consumed.
+
+   interpolator:
+     \ [ assignment-expression-list ]
+     \ [: assignment-expression :]
+     \ { assignment-expression }
+     \ val ( assignment-expression )
+     \ str ( assignment-expression )
+
+   Sets *KIND and returns the operand, a TREE_VEC of operands for \[...],
+   or error_mark_node.  */
+
+static tree
+cp_parser_token_sequence_interpolator (cp_parser *parser, location_t bs_loc,
+				       token_interpolator_kind *kind)
+{
+  cp_token *token = cp_lexer_peek_token (parser->lexer);
+  tree expr;
+  switch (token->type)
+    {
+    case CPP_OPEN_SQUARE:
+      {
+	/* Consume the '['.  */
+	cp_lexer_consume_token (parser->lexer);
+	auto_vec<tree, 4> ops;
+	do
+	  {
+	    expr = cp_parser_assignment_expression (parser, NULL, false,
+						    false);
+	    if (expr == error_mark_node)
+	      return error_mark_node;
+	    ops.safe_push (expr);
+	  }
+	while (cp_lexer_next_token_is (parser->lexer, CPP_COMMA)
+	       && cp_lexer_consume_token (parser->lexer));
+	if (!cp_parser_require (parser, CPP_CLOSE_SQUARE, RT_CLOSE_SQUARE))
+	  return error_mark_node;
+	*kind = TIK_IDENTIFIER;
+	tree vec = make_tree_vec (ops.length ());
+	for (unsigned i = 0; i < ops.length (); ++i)
+	  TREE_VEC_ELT (vec, i) = ops[i];
+	return vec;
+      }
+
+    case CPP_OPEN_SPLICE:
+      /* Consume the '[:'.  */
+      cp_lexer_consume_token (parser->lexer);
+      expr = cp_parser_assignment_expression (parser, NULL, false, false);
+      if (expr == error_mark_node)
+	return error_mark_node;
+      if (!cp_parser_require (parser, CPP_CLOSE_SPLICE, RT_CLOSE_SPLICE))
+	return error_mark_node;
+      *kind = TIK_SPLICE;
+      return expr;
+
+    case CPP_OPEN_BRACE:
+      /* Consume the '{'.  */
+      cp_lexer_consume_token (parser->lexer);
+      expr = cp_parser_assignment_expression (parser, NULL, false, false);
+      if (expr == error_mark_node)
+	return error_mark_node;
+      if (!cp_parser_require (parser, CPP_CLOSE_BRACE, RT_CLOSE_BRACE))
+	return error_mark_node;
+      *kind = TIK_TOKENS;
+      return expr;
+
+    case CPP_NAME:
+      if ((id_equal (token->u.value, "val") || id_equal (token->u.value, "str"))
+	  && cp_lexer_nth_token_is (parser->lexer, 2, CPP_OPEN_PAREN))
+	{
+	  *kind = id_equal (token->u.value, "val") ? TIK_VALUE : TIK_STRING;
+	  /* Consume the name.  */
+	  cp_lexer_consume_token (parser->lexer);
+	  matching_parens parens;
+	  parens.consume_open (parser);
+	  expr = cp_parser_assignment_expression (parser, NULL, false, false);
+	  if (expr == error_mark_node)
+	    return error_mark_node;
+	  if (!parens.require_close (parser))
+	    return error_mark_node;
+	  return expr;
+	}
+      /* FALLTHRU */
+    default:
+      error_at (bs_loc, "expected an interpolator (%<\\[%>, %<\\[:%>, "
+		"%<\\{%>, %<\\val(%> or %<\\str(%>) after %<\\%>");
+      return error_mark_node;
+    }
+}
+
+/* Parse a token-sequence expression (P3294, -ftoken-injection).  The '^^'
+   at CARET_LOC has been consumed and the next token is '{'.
+
+   token-sequence-expression:
+     ^^ { balanced-brace-token-seq[opt] }
+
+   Only braces need to balance.  The tokens are not parsed, but copied as
+   written, except that an interpolator (see
+   cp_parser_token_sequence_interpolator) is parsed and replaced by a
+   CPP_TOKEN_VALUE placeholder token that is filled in when the expression
+   is constant-evaluated.  Returns a reflection of the token sequence, or
+   a TOKEN_SEQUENCE_EXPR if there are interpolators.  */
+
+static tree
+cp_parser_token_sequence_expression (cp_parser *parser, location_t caret_loc)
+{
+  const location_t start_loc = cp_lexer_peek_token (parser->lexer)->location;
+  if (!flag_token_injection)
+    {
+      error_at (start_loc, "token sequences are only available with "
+		"%<-ftoken-injection%>");
+      /* Skip the '{', the tokens and the matching '}'.  */
+      cp_lexer_consume_token (parser->lexer);
+      if (cp_parser_skip_to_closing_brace (parser))
+	cp_lexer_consume_token (parser->lexer);
+      return error_mark_node;
+    }
+
+  /* Consume the '{'.  */
+  cp_lexer_consume_token (parser->lexer);
+
+  vec<cp_token, va_gc> *tokens = NULL;
+  vec_alloc (tokens, 16);
+  auto_vec<tree, 4> interps;
+  unsigned depth = 0;
+  bool ok = true;
+
+  while (true)
+    {
+      cp_token *token = cp_lexer_peek_token (parser->lexer);
+      if (token->type == CPP_EOF || token->type == CPP_PRAGMA_EOL)
+	{
+	  error_at (token->location, "expected %<}%> at end of token "
+		    "sequence");
+	  inform (start_loc, "token sequence starts here");
+	  return error_mark_node;
+	}
+      else if (token->type == CPP_CLOSE_BRACE)
+	{
+	  if (depth == 0)
+	    {
+	      cp_lexer_consume_token (parser->lexer);
+	      break;
+	    }
+	  --depth;
+	}
+      else if (token->type == CPP_OPEN_BRACE)
+	++depth;
+      else if (token->type == CPP_OTHER && token->u.value == NULL_TREE)
+	{
+	  /* A backslash: an interpolator.  */
+	  const location_t bs_loc = token->location;
+	  cp_lexer_consume_token (parser->lexer);
+	  token_interpolator_kind kind = TIK_VALUE;
+	  tree op = cp_parser_token_sequence_interpolator (parser, bs_loc,
+							   &kind);
+	  if (op == error_mark_node)
+	    {
+	      ok = false;
+	      continue;
+	    }
+	  cp_token tok = {};
+	  tok.keyword = RID_MAX;
+	  tok.location = bs_loc;
+	  if (kind == TIK_SPLICE)
+	    {
+	      tok.type = CPP_OPEN_SPLICE;
+	      vec_safe_push (tokens, tok);
+	    }
+	  tree ip = make_tree_vec (3);
+	  TREE_VEC_ELT (ip, 0) = build_int_cst (integer_type_node, kind);
+	  TREE_VEC_ELT (ip, 1) = size_int (vec_safe_length (tokens));
+	  TREE_VEC_ELT (ip, 2) = op;
+	  interps.safe_push (ip);
+	  tok.type = CPP_TOKEN_VALUE;
+	  vec_safe_push (tokens, tok);
+	  if (kind == TIK_SPLICE)
+	    {
+	      tok.type = CPP_CLOSE_SPLICE;
+	      vec_safe_push (tokens, tok);
+	    }
+	  continue;
+	}
+      vec_safe_push (tokens, *token);
+      cp_lexer_consume_token (parser->lexer);
+    }
+
+  if (!ok)
+    return error_mark_node;
+
+  tree ivec = make_tree_vec (interps.length ());
+  for (unsigned i = 0; i < interps.length (); ++i)
+    TREE_VEC_ELT (ivec, i) = interps[i];
+  return finish_token_sequence_expr (caret_loc, make_token_sequence (tokens),
+				     ivec);
+}
+
 /* Parse a reflect-expression.
 
    reflect-expression:
@@ -10091,6 +10321,7 @@ cp_parser_reflection_name (cp_parser *parser)
      ^^ reflection-name
      ^^ type-id
      ^^ id-expression
+     ^^ { balanced-brace-token-seq[opt] }	(-ftoken-injection)
 
   Returns a representation of the reflection.  */
 
@@ -10104,8 +10335,14 @@ cp_parser_reflect_expression (cp_parser *parser)
       return error_mark_node;
     }
 
+  const location_t caret_loc = cp_lexer_peek_token (parser->lexer)->location;
+
   /* Consume the '^^'.  */
   cp_lexer_consume_token (parser->lexer);
+
+  /* ^^{ starts a token sequence.  */
+  if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_BRACE))
+    return cp_parser_token_sequence_expression (parser, caret_loc);
 
   /* Get the location of the operand.  */
   const location_t loc = cp_lexer_peek_token (parser->lexer)->location;

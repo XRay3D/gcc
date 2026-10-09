@@ -1122,6 +1122,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	    cpp_define (pfile, "__cpp_impl_reflection=202603L");
 	  else
 	    cpp_warn (pfile, "__cpp_impl_reflection");
+	  if (flag_token_injection)
+	    cpp_define (pfile, "__GXX_TOKEN_INJECTION__=1");
 	}
       if (flag_concepts && cxx_dialect > cxx14)
 	cpp_define (pfile, "__cpp_concepts=202002L");

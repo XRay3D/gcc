@@ -4344,6 +4344,28 @@ write_reflection (tree refl)
     }
   else if (strcmp (prefix, "de") == 0)
     write_expression (arg);
+  else if (strcmp (prefix, "tk") == 0)
+    {
+      /* A token sequence is mangled structurally from the spelling of its
+	 tokens: <number of characters> _ <escaped spelling>, where every
+	 character that is not alphanumeric is written as _ followed by
+	 two hexadecimal digits.  This is only an implementation-defined
+	 encoding for an extension (-ftoken-injection).  */
+      pretty_printer pp;
+      token_sequence_spelling (&pp, arg);
+      const char *str = pp_formatted_text (&pp);
+      write_unsigned_number (strlen (str));
+      write_char ('_');
+      for (const char *p = str; *p; ++p)
+	if (ISALNUM (*p))
+	  write_char (*p);
+	else
+	  {
+	    char buf[4];
+	    snprintf (buf, sizeof buf, "_%02x", (unsigned char) *p);
+	    write_string (buf);
+	  }
+    }
   else
     gcc_unreachable ();
 }

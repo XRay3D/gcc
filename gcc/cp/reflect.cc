@@ -25,6 +25,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "target.h"
 #include "tm.h"
 #include "cp-tree.h"
+#include "c-family/c-common.h"
+#include "parser.h" // for cp_token
 #include "stringpool.h" // for get_identifier
 #include "intl.h"
 #include "attribs.h"
@@ -413,6 +415,8 @@ replace_parm_r (tree *tp, int *walk_subtrees, void *data)
 
 static tree throw_exception (location_t, const constexpr_ctx *, const char *,
 			     tree, bool *, tree *);
+static tree eval_is_token_sequence (reflect_kind);
+static tree eval_is_empty_token_sequence (tree, reflect_kind);
 
 /* Helper function for get_range_elts, handle adjustment of ARRAY_TYPE elts
    of a retvec.  */
@@ -8037,7 +8041,7 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
 	if (*jump_target || *non_constant_p)
 	  return NULL_TREE;
 	ht = REFLECT_EXPR_HANDLE (info);
-	if (error_operand_p (ht))
+	if (TREE_CODE (ht) != TOKEN_SEQUENCE && error_operand_p (ht))
 	  {
 	    *non_constant_p = true;
 	    return NULL_TREE;
@@ -8397,6 +8401,10 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
 				    overflow_p, jump_target, fun);
     case METAFN_IS_DATA_MEMBER_SPEC:
       return eval_is_data_member_spec (h, kind);
+    case METAFN_IS_TOKEN_SEQUENCE:
+      return eval_is_token_sequence (kind);
+    case METAFN_IS_EMPTY_TOKEN_SEQUENCE:
+      return eval_is_empty_token_sequence (h, kind);
     case METAFN_DEFINE_AGGREGATE:
       return eval_define_aggregate (loc, ctx, h, hvec, call, non_constant_p);
     case METAFN_IS_VOID_TYPE:
@@ -9097,6 +9105,718 @@ check_out_of_consteval_use (tree expr, bool complain/*=true*/)
   return false;
 }
 
+/* Token sequences (P3294, -ftoken-injection).
+
+   A token sequence is a reflection (REFLECT_EXPR of kind REFLECT_TOKENS)
+   whose handle is a TOKEN_SEQUENCE holding a vector of cp_tokens as
+   written in a ^^{ ... } token-sequence expression, after the
+   interpolators in it have been evaluated.  */
+
+/* Return true if R is a reflection of a token sequence.  */
+
+bool
+token_sequence_p (const_tree r)
+{
+  return REFLECT_EXPR_P (r) && REFLECT_EXPR_KIND (r) == REFLECT_TOKENS;
+}
+
+/* Create a TOKEN_SEQUENCE holding TOKENS.  */
+
+tree
+make_token_sequence (vec<cp_token, va_gc> *tokens)
+{
+  tree t = make_node (TOKEN_SEQUENCE);
+  TOKEN_SEQUENCE_TOKENS (t) = tokens;
+  return t;
+}
+
+/* Return true if TOKEN is a literal.  */
+
+static bool
+literal_token_p (const cp_token *token)
+{
+  switch ((int) token->type)
+    {
+    case CPP_NUMBER:
+    case CPP_CHAR:
+    case CPP_WCHAR:
+    case CPP_CHAR16:
+    case CPP_CHAR32:
+    case CPP_UTF8CHAR:
+    case CPP_CHAR_USERDEF:
+    case CPP_WCHAR_USERDEF:
+    case CPP_CHAR16_USERDEF:
+    case CPP_CHAR32_USERDEF:
+    case CPP_UTF8CHAR_USERDEF:
+    case CPP_STRING:
+    case CPP_WSTRING:
+    case CPP_STRING16:
+    case CPP_STRING32:
+    case CPP_UTF8STRING:
+    case CPP_STRING_USERDEF:
+    case CPP_WSTRING_USERDEF:
+    case CPP_STRING16_USERDEF:
+    case CPP_STRING32_USERDEF:
+    case CPP_UTF8STRING_USERDEF:
+      return true;
+    default:
+      return false;
+    }
+}
+
+/* Append the spelling of TOKEN to PP.  */
+
+static void
+token_spelling (pretty_printer *pp, const cp_token *token)
+{
+  tree value = token->u.value;
+  switch ((int) token->type)
+    {
+    case CPP_NAME:
+      pp_string (pp, IDENTIFIER_POINTER (value));
+      break;
+
+    case CPP_KEYWORD:
+      if (value && identifier_p (value))
+	pp_string (pp, IDENTIFIER_POINTER (value));
+      else
+	pp_string (pp, IDENTIFIER_POINTER (ridpointers[token->keyword]));
+      break;
+
+    case CPP_STRING:
+    case CPP_WSTRING:
+    case CPP_STRING16:
+    case CPP_STRING32:
+    case CPP_UTF8STRING:
+      /* The text of the literal as written, including the prefix and
+	 the quotes.  */
+      pp_string (pp, TREE_STRING_POINTER (value));
+      break;
+
+    case CPP_TOKEN_VALUE:
+      if (value == NULL_TREE)
+	/* An interpolator that has not been evaluated yet.  */
+	pp_string (pp, "\\(...)");
+      else
+	pp_string (pp, expr_to_string (value));
+      break;
+
+    default:
+      if (literal_token_p (token))
+	{
+	  /* Numbers and character constants have been interpreted; their
+	     spelling was recorded by c-lex.cc.  */
+	  if (const char *s = c_token_spelling (token->location))
+	    pp_string (pp, s);
+	  else if (TREE_CODE (value) == USERDEF_LITERAL)
+	    {
+	      tree v = USERDEF_LITERAL_VALUE (value);
+	      if (tree num = USERDEF_LITERAL_NUM_STRING (value))
+		pp_string (pp, TREE_STRING_POINTER (num));
+	      else if (TREE_CODE (v) == STRING_CST)
+		pp_string (pp, TREE_STRING_POINTER (v));
+	      else
+		pp_string (pp, expr_to_string (v));
+	      pp_string (pp,
+			 IDENTIFIER_POINTER (USERDEF_LITERAL_SUFFIX_ID (value)));
+	    }
+	  else
+	    pp_string (pp, expr_to_string (value));
+	}
+      else if (token->type < N_TTYPES)
+	pp_string (pp, cpp_type2name (token->type, token->flags));
+      else
+	pp_string (pp, "<token>");
+      break;
+    }
+}
+
+/* Append the spelling of the tokens of the TOKEN_SEQUENCE TS to PP,
+   separated by single spaces.  */
+
+void
+token_sequence_spelling (pretty_printer *pp, tree ts)
+{
+  unsigned i;
+  cp_token *token;
+  FOR_EACH_VEC_SAFE_ELT (TOKEN_SEQUENCE_TOKENS (ts), i, token)
+    {
+      if (i)
+	pp_space (pp);
+      token_spelling (pp, token);
+    }
+}
+
+/* Return true if the tokens A and B are the same token: of the same
+   kind, and for identifiers and keywords the same identifier, for
+   literals the same spelling, for interpolated values the same value
+   of the same type.  */
+
+static bool
+tokens_equal (const cp_token *a, const cp_token *b)
+{
+  if (a->type != b->type)
+    return false;
+  switch ((int) a->type)
+    {
+    case CPP_NAME:
+      return a->u.value == b->u.value;
+
+    case CPP_KEYWORD:
+      return a->keyword == b->keyword;
+
+    case CPP_TOKEN_VALUE:
+      if (a->u.value == NULL_TREE || b->u.value == NULL_TREE)
+	return a->u.value == b->u.value;
+      return (same_type_p (TREE_TYPE (a->u.value), TREE_TYPE (b->u.value))
+	      && cp_tree_equal (a->u.value, b->u.value));
+
+    default:
+      if (literal_token_p (a))
+	{
+	  pretty_printer pa, pb;
+	  token_spelling (&pa, a);
+	  token_spelling (&pb, b);
+	  return strcmp (pp_formatted_text (&pa), pp_formatted_text (&pb)) == 0;
+	}
+      /* Punctuators: an alternative token such as bitor is not the same
+	 token as |.  */
+      return (a->flags & NAMED_OP) == (b->flags & NAMED_OP);
+    }
+}
+
+/* Return true if the TOKEN_SEQUENCEs TS1 and TS2 hold the same tokens.  */
+
+static bool
+token_sequences_equal (tree ts1, tree ts2)
+{
+  vec<cp_token, va_gc> *v1 = TOKEN_SEQUENCE_TOKENS (ts1);
+  vec<cp_token, va_gc> *v2 = TOKEN_SEQUENCE_TOKENS (ts2);
+  if (vec_safe_length (v1) != vec_safe_length (v2))
+    return false;
+  for (unsigned i = 0; i < vec_safe_length (v1); ++i)
+    if (!tokens_equal (&(*v1)[i], &(*v2)[i]))
+      return false;
+  return true;
+}
+
+/* Hash the TOKEN_SEQUENCE TS into VAL, consistently with
+   token_sequences_equal.  */
+
+hashval_t
+hash_token_sequence (tree ts, hashval_t val)
+{
+  pretty_printer pp;
+  token_sequence_spelling (&pp, ts);
+  const char *s = pp_formatted_text (&pp);
+  val = iterative_hash (s, strlen (s), val);
+  return iterative_hash_hashval_t (vec_safe_length (TOKEN_SEQUENCE_TOKENS (ts)),
+				   val);
+}
+
+/* Return true if TYPE, the type of an operand of a \[...] or \str(...)
+   interpolator after decay, is a string: a pointer to char or char8_t,
+   or a class type (whose size() and data() members are used).  */
+
+static bool
+string_like_type_p (tree type)
+{
+  if (CLASS_TYPE_P (type))
+    return true;
+  if (!POINTER_TYPE_P (type))
+    return false;
+  tree elt = TYPE_MAIN_VARIANT (TREE_TYPE (type));
+  return elt == char_type_node || elt == char8_type_node;
+}
+
+/* Return true if TYPE is an integer type whose values can be a later
+   operand of a \[...] interpolator, contributing their decimal
+   representation.  */
+
+static bool
+interpolated_integer_type_p (tree type)
+{
+  return (TREE_CODE (type) == INTEGER_TYPE
+	  && !char_type_p (type)
+	  && !same_type_p (type, boolean_type_node));
+}
+
+/* Finish a token-sequence expression ^^{ ... } at LOC.  TS is the
+   TOKEN_SEQUENCE holding the tokens as written (with placeholders for the
+   interpolators), INTERPS is the TREE_VEC of interpolators, see
+   TOKEN_SEQUENCE_EXPR_INTERPOLATORS.  Checks and converts the operands of
+   the interpolators that are not dependent.  Returns the reflection of the
+   token sequence if there are no interpolators, otherwise a
+   TOKEN_SEQUENCE_EXPR to be evaluated during constant evaluation.  */
+
+tree
+finish_token_sequence_expr (location_t loc, tree ts, tree interps)
+{
+  if (TREE_VEC_LENGTH (interps) == 0)
+    return get_reflection_raw (loc, ts, REFLECT_TOKENS);
+
+  for (int i = 0; i < TREE_VEC_LENGTH (interps); ++i)
+    {
+      tree ip = TREE_VEC_ELT (interps, i);
+      token_interpolator_kind kind
+	= (token_interpolator_kind) tree_to_shwi (TREE_VEC_ELT (ip, 0));
+      tree op = TREE_VEC_ELT (ip, 2);
+      switch (kind)
+	{
+	case TIK_SPLICE:
+	case TIK_TOKENS:
+	  /* The operand is converted to std::meta::info.  */
+	  if (!type_dependent_expression_p (op))
+	    {
+	      op = perform_implicit_conversion_flags (meta_info_type_node, op,
+						      tf_warning_or_error,
+						      LOOKUP_NORMAL);
+	      if (op == error_mark_node)
+		return error_mark_node;
+	      TREE_VEC_ELT (ip, 2) = op;
+	    }
+	  break;
+
+	case TIK_VALUE:
+	  if (!type_dependent_expression_p (op))
+	    {
+	      op = decay_conversion (op, tf_warning_or_error);
+	      if (op == error_mark_node)
+		return error_mark_node;
+	      tree type = cv_unqualified (TREE_TYPE (op));
+	      if (!REFLECTION_TYPE_P (type) && !structural_type_p (type))
+		{
+		  error_at (cp_expr_loc_or_loc (op, loc), "operand of "
+			    "%<\\val%> interpolator has type %qT, which is "
+			    "not a structural type", type);
+		  return error_mark_node;
+		}
+	      TREE_VEC_ELT (ip, 2) = op;
+	    }
+	  break;
+
+	case TIK_STRING:
+	case TIK_IDENTIFIER:
+	  {
+	    tree ops = kind == TIK_IDENTIFIER ? op : NULL_TREE;
+	    int n = ops ? TREE_VEC_LENGTH (ops) : 1;
+	    for (int j = 0; j < n; ++j)
+	      {
+		tree o = ops ? TREE_VEC_ELT (ops, j) : op;
+		if (type_dependent_expression_p (o))
+		  continue;
+		o = decay_conversion (o, tf_warning_or_error);
+		if (o == error_mark_node)
+		  return error_mark_node;
+		tree type = TREE_TYPE (o);
+		if (!string_like_type_p (type)
+		    && !(j > 0 && interpolated_integer_type_p (type)))
+		  {
+		    location_t oloc = cp_expr_loc_or_loc (o, loc);
+		    if (kind == TIK_STRING)
+		      error_at (oloc, "operand of %<\\str%> interpolator must "
+				"be a string, but has type %qT", type);
+		    else if (j == 0)
+		      error_at (oloc, "first operand of %<\\[%> interpolator "
+				"must be a string, but has type %qT", type);
+		    else
+		      error_at (oloc, "operand %d of %<\\[%> interpolator "
+				"must be a string or an integer, but has "
+				"type %qT", j + 1, type);
+		    return error_mark_node;
+		  }
+		if (ops)
+		  TREE_VEC_ELT (ops, j) = o;
+		else
+		  TREE_VEC_ELT (ip, 2) = o;
+	      }
+	  }
+	  break;
+	}
+    }
+
+  return build2_loc (loc, TOKEN_SEQUENCE_EXPR, meta_info_type_node, ts,
+		     interps);
+}
+
+/* Evaluate the interpolator operand OP in CTX.  Returns NULL_TREE if it
+   is not a constant.  */
+
+static tree
+eval_interpolator_operand (const constexpr_ctx *ctx, tree op,
+			   bool *non_constant_p, bool *overflow_p,
+			   tree *jump_target)
+{
+  op = cxx_eval_constant_expression (ctx, op, vc_prvalue, non_constant_p,
+				     overflow_p, jump_target);
+  if (*jump_target || *non_constant_p)
+    return NULL_TREE;
+  return op;
+}
+
+/* Read the characters of V, the evaluated string-like operand of an
+   interpolator at LOC: a pointer to a NUL-terminated string of char or
+   char8_t, or an object of a class type with size() and data() members.
+   Append them to BUF; set *U8 if the characters are char8_t.  Returns
+   false (and sets *NON_CONSTANT_P) on failure.  */
+
+static bool
+read_interpolated_string (location_t loc, const constexpr_ctx *ctx, tree v,
+			  auto_vec<char> &buf, bool *u8,
+			  bool *non_constant_p, bool *overflow_p,
+			  tree *jump_target)
+{
+  tree type = TREE_TYPE (v);
+  tree ptr = v;
+  tree len = NULL_TREE;
+  if (CLASS_TYPE_P (type))
+    {
+      tree size_fns = lookup_member (type, get_identifier ("size"),
+				     /*protect=*/1, /*want_type=*/false,
+				     tf_warning_or_error);
+      tree data_fns = lookup_member (type, get_identifier ("data"),
+				     /*protect=*/1, /*want_type=*/false,
+				     tf_warning_or_error);
+      if (!size_fns || !BASELINK_P (size_fns)
+	  || !data_fns || !BASELINK_P (data_fns))
+	{
+	  if (!cxx_constexpr_quiet_p (ctx))
+	    error_at (loc, "operand of interpolator of class type %qT lacks "
+		      "a %<size()%> or %<data()%> member", type);
+	  *non_constant_p = true;
+	  return false;
+	}
+      releasing_vec args;
+      tree call = build_new_method_call (get_target_expr (v), size_fns, &args,
+					 NULL_TREE, LOOKUP_NORMAL, NULL,
+					 tf_warning_or_error);
+      if (call == error_mark_node)
+	{
+	  *non_constant_p = true;
+	  return false;
+	}
+      len = eval_interpolator_operand (ctx, call, non_constant_p, overflow_p,
+				       jump_target);
+      if (len == NULL_TREE)
+	return false;
+      if (TREE_CODE (len) != INTEGER_CST || !tree_fits_uhwi_p (len))
+	{
+	  *non_constant_p = true;
+	  return false;
+	}
+      call = build_new_method_call (get_target_expr (v), data_fns, &args,
+				    NULL_TREE, LOOKUP_NORMAL, NULL,
+				    tf_warning_or_error);
+      if (call == error_mark_node)
+	{
+	  *non_constant_p = true;
+	  return false;
+	}
+      ptr = eval_interpolator_operand (ctx, call, non_constant_p, overflow_p,
+				       jump_target);
+      if (ptr == NULL_TREE)
+	return false;
+      type = TREE_TYPE (ptr);
+    }
+
+  if (!POINTER_TYPE_P (type)
+      || (TYPE_MAIN_VARIANT (TREE_TYPE (type)) != char_type_node
+	  && TYPE_MAIN_VARIANT (TREE_TYPE (type)) != char8_type_node))
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "operand of interpolator must be a string, but has "
+		  "type %qT", TREE_TYPE (v));
+      *non_constant_p = true;
+      return false;
+    }
+  *u8 = TYPE_MAIN_VARIANT (TREE_TYPE (type)) == char8_type_node;
+
+  unsigned HOST_WIDE_INT n = len ? tree_to_uhwi (len) : HOST_WIDE_INT_M1U;
+  for (unsigned HOST_WIDE_INT i = 0; i < n; ++i)
+    {
+      tree elt = cp_build_array_ref (loc, ptr, size_int (i), tf_none);
+      if (elt == error_mark_node)
+	{
+	  *non_constant_p = true;
+	  return false;
+	}
+      elt = eval_interpolator_operand (ctx, elt, non_constant_p, overflow_p,
+				       jump_target);
+      if (elt == NULL_TREE)
+	return false;
+      if (TREE_CODE (elt) != INTEGER_CST)
+	{
+	  *non_constant_p = true;
+	  return false;
+	}
+      char c = (char) tree_to_shwi (elt);
+      if (!len && c == '\0')
+	break;
+      buf.safe_push (c);
+    }
+  return true;
+}
+
+/* Append the decimal representation of the INTEGER_CST V to BUF.  */
+
+static void
+append_decimal (auto_vec<char> &buf, tree v)
+{
+  char tmp[WIDE_INT_PRINT_BUFFER_SIZE];
+  print_dec (wi::to_wide (v), tmp, TYPE_SIGN (TREE_TYPE (v)));
+  for (const char *p = tmp; *p; ++p)
+    buf.safe_push (*p);
+}
+
+/* Return an identifier spelled by the characters in BUF, or NULL_TREE if
+   they don't spell an identifier or spell a keyword.  LOC is the location
+   of the \[...] interpolator.  */
+
+static tree
+build_interpolated_identifier (location_t loc, const constexpr_ctx *ctx,
+			       auto_vec<char> &buf, bool *non_constant_p)
+{
+  buf.safe_push ('\0');
+  const char *s = buf.address ();
+  bool valid = s[0] != '\0';
+  for (const unsigned char *p = (const unsigned char *) s; valid && *p; ++p)
+    if (!(ISALPHA (*p) || *p == '_' || *p == '$' || *p >= 0x80
+	  || (p != (const unsigned char *) s && ISDIGIT (*p))))
+      valid = false;
+  if (!valid)
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "%qs does not spell an identifier", s);
+      *non_constant_p = true;
+      return NULL_TREE;
+    }
+  tree id = get_identifier (s);
+  if (IDENTIFIER_KEYWORD_P (id))
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "%qs is a keyword, not an identifier", s);
+      *non_constant_p = true;
+      return NULL_TREE;
+    }
+  return id;
+}
+
+/* Fill in TOK as a string-literal token at LOC whose characters are those
+   in BUF, a UTF-8 string literal if U8.  */
+
+static void
+make_string_literal_token (cp_token *tok, location_t loc,
+			   const auto_vec<char> &buf, bool u8)
+{
+  auto_vec<char, 64> text;
+  if (u8)
+    {
+      text.safe_push ('u');
+      text.safe_push ('8');
+    }
+  text.safe_push ('"');
+  for (char c : buf)
+    {
+      const char *esc = NULL;
+      switch (c)
+	{
+	case '"': esc = "\\\""; break;
+	case '\\': esc = "\\\\"; break;
+	case '\n': esc = "\\n"; break;
+	case '\t': esc = "\\t"; break;
+	case '\r': esc = "\\r"; break;
+	default: break;
+	}
+      if (esc)
+	for (; *esc; ++esc)
+	  text.safe_push (*esc);
+      else if ((unsigned char) c < 0x20 || (unsigned char) c >= 0x7f)
+	{
+	  /* Control characters and bytes outside ASCII are written as
+	     octal escapes, which are not translated again.  */
+	  char tmp[5];
+	  snprintf (tmp, sizeof tmp, "\\%03o", (unsigned char) c);
+	  for (const char *p = tmp; *p; ++p)
+	    text.safe_push (*p);
+	}
+      else
+	text.safe_push (c);
+    }
+  text.safe_push ('"');
+  *tok = {};
+  tok->type = u8 ? CPP_UTF8STRING : CPP_STRING;
+  tok->keyword = RID_MAX;
+  tok->location = loc;
+  tok->u.value = build_string (text.length (), text.address ());
+}
+
+/* Evaluate the TOKEN_SEQUENCE_EXPR T in CTX: evaluate the operands of
+   its interpolators and splice the results into the written tokens.
+   Returns a reflection of the resulting token sequence.  */
+
+tree
+eval_token_sequence_expr (const constexpr_ctx *ctx, tree t,
+			  bool *non_constant_p, bool *overflow_p,
+			  tree *jump_target)
+{
+  const location_t loc = EXPR_LOCATION (t);
+  vec<cp_token, va_gc> *in
+    = TOKEN_SEQUENCE_TOKENS (TOKEN_SEQUENCE_EXPR_TOKENS (t));
+  tree interps = TOKEN_SEQUENCE_EXPR_INTERPOLATORS (t);
+  vec<cp_token, va_gc> *out = NULL;
+  vec_alloc (out, vec_safe_length (in));
+  unsigned next = 0;
+
+  for (int i = 0; i < TREE_VEC_LENGTH (interps); ++i)
+    {
+      tree ip = TREE_VEC_ELT (interps, i);
+      token_interpolator_kind kind
+	= (token_interpolator_kind) tree_to_shwi (TREE_VEC_ELT (ip, 0));
+      unsigned pos = tree_to_uhwi (TREE_VEC_ELT (ip, 1));
+      tree op = TREE_VEC_ELT (ip, 2);
+      gcc_checking_assert (pos < vec_safe_length (in) && pos >= next);
+      while (next < pos)
+	vec_safe_push (out, (*in)[next++]);
+      cp_token tok = (*in)[next++];
+      gcc_checking_assert (tok.type == CPP_TOKEN_VALUE);
+      const location_t iloc = tok.location;
+
+      switch (kind)
+	{
+	case TIK_SPLICE:
+	case TIK_TOKENS:
+	  {
+	    tree v = eval_interpolator_operand (ctx, op, non_constant_p,
+						overflow_p, jump_target);
+	    if (v == NULL_TREE)
+	      return t;
+	    if (!REFLECT_EXPR_P (v))
+	      {
+		*non_constant_p = true;
+		return t;
+	      }
+	    if (kind == TIK_SPLICE)
+	      {
+		tok.u.value = v;
+		vec_safe_push (out, tok);
+		break;
+	      }
+	    if (!token_sequence_p (v))
+	      {
+		if (!cxx_constexpr_quiet_p (ctx))
+		  error_at (iloc, "operand of %<\\{...}%> interpolator is "
+			    "not a token sequence");
+		*non_constant_p = true;
+		return t;
+	      }
+	    unsigned j;
+	    cp_token *tk;
+	    FOR_EACH_VEC_SAFE_ELT (TOKEN_SEQUENCE_TOKENS
+				   (REFLECT_EXPR_HANDLE (v)), j, tk)
+	      vec_safe_push (out, *tk);
+	    break;
+	  }
+
+	case TIK_VALUE:
+	  {
+	    tree v = eval_interpolator_operand (ctx, op, non_constant_p,
+						overflow_p, jump_target);
+	    if (v == NULL_TREE)
+	      return t;
+	    tree type = cv_unqualified (TREE_TYPE (op));
+	    tree conv = convert_reflect_constant_arg (type, v);
+	    if (conv == error_mark_node)
+	      {
+		if (!cxx_constexpr_quiet_p (ctx))
+		  error_at (iloc, "cannot interpolate value %qE of type %qT: "
+			    "it is not usable as a template argument", v,
+			    type);
+		*non_constant_p = true;
+		return t;
+	      }
+	    tok.u.value = conv;
+	    vec_safe_push (out, tok);
+	    break;
+	  }
+
+	case TIK_STRING:
+	  {
+	    tree v = eval_interpolator_operand (ctx, op, non_constant_p,
+						overflow_p, jump_target);
+	    if (v == NULL_TREE)
+	      return t;
+	    auto_vec<char> buf;
+	    bool u8 = false;
+	    if (!read_interpolated_string (iloc, ctx, v, buf, &u8,
+					   non_constant_p, overflow_p,
+					   jump_target))
+	      return t;
+	    make_string_literal_token (&tok, iloc, buf, u8);
+	    vec_safe_push (out, tok);
+	    break;
+	  }
+
+	case TIK_IDENTIFIER:
+	  {
+	    auto_vec<char> buf;
+	    for (int j = 0; j < TREE_VEC_LENGTH (op); ++j)
+	      {
+		tree o = TREE_VEC_ELT (op, j);
+		tree v = eval_interpolator_operand (ctx, o, non_constant_p,
+						    overflow_p, jump_target);
+		if (v == NULL_TREE)
+		  return t;
+		if (j > 0 && TREE_CODE (v) == INTEGER_CST
+		    && interpolated_integer_type_p (TREE_TYPE (v)))
+		  {
+		    append_decimal (buf, v);
+		    continue;
+		  }
+		bool u8;
+		if (!read_interpolated_string (iloc, ctx, v, buf, &u8,
+					       non_constant_p, overflow_p,
+					       jump_target))
+		  return t;
+	      }
+	    tree id = build_interpolated_identifier (iloc, ctx, buf,
+						     non_constant_p);
+	    if (id == NULL_TREE)
+	      return t;
+	    tok.type = CPP_NAME;
+	    tok.u.value = id;
+	    vec_safe_push (out, tok);
+	    break;
+	  }
+	}
+    }
+
+  while (next < vec_safe_length (in))
+    vec_safe_push (out, (*in)[next++]);
+
+  return get_reflection_raw (loc, make_token_sequence (out), REFLECT_TOKENS);
+}
+
+/* Process std::meta::is_token_sequence.
+   Returns: true if r represents a token sequence.  Otherwise, false.  */
+
+static tree
+eval_is_token_sequence (reflect_kind kind)
+{
+  return kind == REFLECT_TOKENS ? boolean_true_node : boolean_false_node;
+}
+
+/* Process std::meta::is_empty_token_sequence.
+   Returns: true if r represents a token sequence without tokens.
+   Otherwise, false.  */
+
+static tree
+eval_is_empty_token_sequence (tree r, reflect_kind kind)
+{
+  if (kind == REFLECT_TOKENS && vec_safe_is_empty (TOKEN_SEQUENCE_TOKENS (r)))
+    return boolean_true_node;
+  return boolean_false_node;
+}
+
 /* Return true if the reflections LHS and RHS are equal.  */
 
 bool
@@ -9112,6 +9832,9 @@ compare_reflections (tree lhs, tree rhs)
       rhs = REFLECT_EXPR_HANDLE (rhs);
     }
   while (REFLECT_EXPR_P (lhs) && REFLECT_EXPR_P (rhs));
+
+  if (lkind == REFLECT_TOKENS)
+    return token_sequences_equal (lhs, rhs);
 
   lhs = resolve_nondeduced_context (lhs, tf_warning_or_error);
   rhs = resolve_nondeduced_context (rhs, tf_warning_or_error);
@@ -9478,6 +10201,11 @@ reflection_mangle_prefix (tree refl, char prefix[3])
     {
       strcpy (prefix, "nu");
       return NULL_TREE;
+    }
+  if (kind == REFLECT_TOKENS)
+    {
+      strcpy (prefix, "tk");
+      return h;
     }
   if (eval_is_value (kind) == boolean_true_node)
     {

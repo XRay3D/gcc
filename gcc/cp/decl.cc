@@ -21202,6 +21202,7 @@ cp_tree_node_structure (union lang_tree_node * t)
     case CONSTRAINT_INFO:	return TS_CP_CONSTRAINT_INFO;
     case DEFERRED_NOEXCEPT:	return TS_CP_DEFERRED_NOEXCEPT;
     case DEFERRED_PARSE:	return TS_CP_DEFERRED_PARSE;
+    case TOKEN_SEQUENCE:	return TS_CP_TOKEN_SEQUENCE;
     case IDENTIFIER_NODE:	return TS_CP_IDENTIFIER;
     case LAMBDA_EXPR:		return TS_CP_LAMBDA_EXPR;
     case BINDING_VECTOR:	return TS_CP_BINDING_VECTOR;

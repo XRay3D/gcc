@@ -1917,6 +1917,8 @@ iterative_hash_template_arg (tree arg, hashval_t val)
 
     case REFLECT_EXPR:
       val = iterative_hash_hashval_t (REFLECT_EXPR_KIND (arg), val);
+      if (REFLECT_EXPR_KIND (arg) == REFLECT_TOKENS)
+	return hash_token_sequence (REFLECT_EXPR_HANDLE (arg), val);
       if (REFLECT_EXPR_KIND (arg) == REFLECT_BASE)
 	{
 	  tree binfo = REFLECT_EXPR_HANDLE (arg);
@@ -23435,10 +23437,41 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 	RETURN (op);
       }
 
+    case TOKEN_SEQUENCE_EXPR:
+      {
+	tree interps = TOKEN_SEQUENCE_EXPR_INTERPOLATORS (t);
+	tree ninterps = make_tree_vec (TREE_VEC_LENGTH (interps));
+	for (int i = 0; i < TREE_VEC_LENGTH (interps); ++i)
+	  {
+	    tree ip = TREE_VEC_ELT (interps, i);
+	    tree nip = make_tree_vec (3);
+	    TREE_VEC_ELT (nip, 0) = TREE_VEC_ELT (ip, 0);
+	    TREE_VEC_ELT (nip, 1) = TREE_VEC_ELT (ip, 1);
+	    tree op = TREE_VEC_ELT (ip, 2);
+	    if (TREE_CODE (op) == TREE_VEC)
+	      {
+		tree nop = make_tree_vec (TREE_VEC_LENGTH (op));
+		for (int j = 0; j < TREE_VEC_LENGTH (op); ++j)
+		  TREE_VEC_ELT (nop, j) = RECUR (TREE_VEC_ELT (op, j));
+		op = nop;
+	      }
+	    else
+	      op = RECUR (op);
+	    TREE_VEC_ELT (nip, 2) = op;
+	    TREE_VEC_ELT (ninterps, i) = nip;
+	  }
+	RETURN (finish_token_sequence_expr (EXPR_LOCATION (t),
+					    TOKEN_SEQUENCE_EXPR_TOKENS (t),
+					    ninterps));
+      }
+
     case REFLECT_EXPR:
       {
 	tree h = REFLECT_EXPR_HANDLE (t);
 	reflect_kind kind = REFLECT_EXPR_KIND (t);
+	if (kind == REFLECT_TOKENS)
+	  /* A token sequence has nothing to substitute into.  */
+	  RETURN (t);
 	if (TYPE_P (h) || TREE_CODE (h) == NAMESPACE_DECL)
 	  h = tsubst (h, args, complain, in_decl);
 	else if (kind == REFLECT_ANNOTATION)
@@ -30117,11 +30150,36 @@ value_dependent_expression_p (tree expression)
 	      || value_dependent_expression_p (TREE_OPERAND (expression, 2))
 	      || value_dependent_expression_p (TREE_OPERAND (expression, 3)));
 
+    case TOKEN_SEQUENCE:
+      return false;
+
+    case TOKEN_SEQUENCE_EXPR:
+      {
+	/* A token-sequence expression is value-dependent if an operand of
+	   one of its interpolators is.  */
+	tree interps = TOKEN_SEQUENCE_EXPR_INTERPOLATORS (expression);
+	for (int i = 0; i < TREE_VEC_LENGTH (interps); ++i)
+	  {
+	    tree op = TREE_VEC_ELT (TREE_VEC_ELT (interps, i), 2);
+	    if (TREE_CODE (op) == TREE_VEC)
+	      {
+		for (int j = 0; j < TREE_VEC_LENGTH (op); ++j)
+		  if (value_dependent_expression_p (TREE_VEC_ELT (op, j)))
+		    return true;
+	      }
+	    else if (value_dependent_expression_p (op))
+	      return true;
+	  }
+	return false;
+      }
+
     case REFLECT_EXPR:
       /* [temp.dep.constexpr] A reflect-expression is value-dependent
 	 if it contains a dependent nested-name-specifier, type-id,
 	 namespace-name, or template-name, or if it contains
 	 a value-dependent or type-dependent id-expression.  */
+      if (REFLECT_EXPR_KIND (expression) == REFLECT_TOKENS)
+	return false;
       if (REFLECT_EXPR_KIND (expression) == REFLECT_BASE)
 	/* Direct base relationship isn't value-dependent and calling
 	   uses_template_parms on TREE_BINFO leads to ICEs.  */
@@ -30194,6 +30252,11 @@ type_dependent_expression_p (tree expression)
   /* Assume a TU-local entity is not dependent, we'll error later when
      instantiating anyway.  */
   if (TREE_CODE (expression) == TU_LOCAL_ENTITY)
+    return false;
+
+  /* A token sequence (the handle of a reflection) has no type and is
+     never dependent.  */
+  if (TREE_CODE (expression) == TOKEN_SEQUENCE)
     return false;
 
   /* An unresolved name is always dependent.  */
@@ -30496,6 +30559,7 @@ instantiation_dependent_r (tree *tp, int *walk_subtrees,
     case TREE_LIST:
     case TREE_VEC:
     case NONTYPE_ARGUMENT_PACK:
+    case TOKEN_SEQUENCE:
       return NULL_TREE;
 
     case TEMPLATE_PARM_INDEX:

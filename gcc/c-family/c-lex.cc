@@ -563,6 +563,40 @@ c_common_has_feature (cpp_reader *pfile, bool strict_p)
 }
 
 
+/* Source spellings of literal tokens whose spelling is not recoverable
+   from their value (numbers, character constants and user-defined
+   literals), keyed by the token location.  Only maintained with
+   -ftoken-injection, where std::meta::token_spelling_of and the
+   comparison of token sequences need the spelling as written.  The text
+   points into libcpp's permanent storage for literal tokens.  */
+
+static hash_map<location_hash, const unsigned char *> *token_spellings;
+
+/* Remember the spelling of the literal token TOK at LOC.  */
+
+static void
+record_token_spelling (location_t loc, const cpp_token *tok)
+{
+  if (!flag_token_injection || !c_dialect_cxx () || loc == UNKNOWN_LOCATION)
+    return;
+  if (!token_spellings)
+    token_spellings = new hash_map<location_hash, const unsigned char *>;
+  token_spellings->put (loc, tok->val.str.text);
+}
+
+/* Return the spelling of the literal token at LOC recorded by
+   record_token_spelling, or NULL if none was recorded.  */
+
+const char *
+c_token_spelling (location_t loc)
+{
+  if (!token_spellings)
+    return NULL;
+  if (const unsigned char **p = token_spellings->get (loc))
+    return (const char *) *p;
+  return NULL;
+}
+
 /* Read a token and return its type.  Fill *VALUE with its value, if
    applicable.  Fill *CPP_FLAGS with the token's flags, if it is
    non-NULL.  */
@@ -595,6 +629,7 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
       {
 	const char *suffix = NULL;
 	unsigned int flags = cpp_classify_number (parse_in, tok, &suffix, *loc);
+	record_token_spelling (*loc, tok);
 
 	switch (flags & CPP_N_CATEGORY)
 	  {
@@ -713,6 +748,15 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
       {
 	cppchar_t c = tok->val.str.text[0];
 
+	/* With -ftoken-injection, a lone backslash introduces an
+	   interpolator in a token sequence; hand it to the C++ parser.  */
+	if (c == '\\' && tok->val.str.len == 1
+	    && c_dialect_cxx () && flag_token_injection)
+	  {
+	    *value = NULL_TREE;
+	    break;
+	  }
+
 	if (c == '"' || c == '\'')
 	  error_at (*loc, "missing terminating %c character", (int) c);
 	else if (ISGRAPH (c))
@@ -733,6 +777,7 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
     case CPP_UTF8CHAR_USERDEF:
       {
 	tree literal;
+	record_token_spelling (*loc, tok);
 	cpp_token temp_tok = *tok;
 	const char *suffix = cpp_get_userdef_suffix (tok);
 	temp_tok.val.str.len -= strlen (suffix);
@@ -749,6 +794,7 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
     case CPP_CHAR16:
     case CPP_CHAR32:
     case CPP_UTF8CHAR:
+      record_token_spelling (*loc, tok);
       *value = lex_charconst (tok);
       break;
 
@@ -759,6 +805,7 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
     case CPP_UTF8STRING_USERDEF:
       {
 	tree literal, string;
+	record_token_spelling (*loc, tok);
 	const char *suffix = cpp_get_userdef_suffix (tok);
 	string = build_string (tok->val.str.len - strlen (suffix),
 			       (const char *) tok->val.str.text);

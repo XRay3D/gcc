@@ -249,7 +249,7 @@ in the following sections.
 -fnew-ttp-matching
 -fno-nonansi-builtins  -fnothrow-opt  -fno-operator-names
 -fno-optional-diags
--fno-pretty-templates  -frange-for-ext-temps  -freflection
+-fno-pretty-templates  -frange-for-ext-temps  -freflection  -ftoken-injection
 -fno-rtti  -fsized-deallocation
 -fstrict-enums  -fstrong-eval-order@r{[}=@var{kind}@r{]}
 -ftemplate-backtrace-limit=@var{n}
@@ -3713,6 +3713,19 @@ in earlier versions of the standard.
 @opindex freflection
 @item -freflection
 Enable experimental C++26 Reflection.
+
+@opindex ftoken-injection
+@item -ftoken-injection
+Enable experimental support for token sequences and code injection
+(P3294), an extension to C++26 Reflection.  A token-sequence expression
+@code{^^@{ @dots{} @}} is a reflection of the tokens written between the
+braces; only braces need to balance.  The interpolators
+@code{\[@var{strings}]} (an identifier), @code{\[: @var{r} :]} (a splice
+of the reflection @var{r}), @code{\@{ @var{ts} @}} (the tokens of the
+token sequence @var{ts}), @code{\val(@var{e})} (the value @var{e}) and
+@code{\str(@var{s})} (a string literal) are evaluated when the expression
+is constant-evaluated.  The macro @code{__GXX_TOKEN_INJECTION__} is
+defined.  This option requires @option{-freflection}.
 
 @opindex fno-rtti
 @opindex frtti
