@@ -417,6 +417,8 @@ static tree throw_exception (location_t, const constexpr_ctx *, const char *,
 			     tree, bool *, tree *);
 static tree eval_is_token_sequence (reflect_kind);
 static tree eval_is_empty_token_sequence (tree, reflect_kind);
+static unsigned operator_function_id_length (vec<cp_token, va_gc> *, unsigned,
+					     tree_code *, bool *);
 
 /* Kinds of std::meta::nearest_* metafunctions.  */
 
@@ -2497,9 +2499,28 @@ eval_is_constructor_template (tree r)
 
 static tree
 eval_operator_of (location_t loc, const constexpr_ctx *ctx, tree r,
-		  bool *non_constant_p, tree *jump_target, tree ret_type,
-		  tree fun)
+		  reflect_kind kind, bool *non_constant_p, tree *jump_target,
+		  tree ret_type, tree fun)
 {
+  if (kind == REFLECT_TOKENS)
+    {
+      /* A token sequence that is exactly one operator-function-id
+	 (-ftoken-injection).  */
+      vec<cp_token, va_gc> *toks = TOKEN_SEQUENCE_TOKENS (r);
+      tree_code code;
+      bool assign_p;
+      unsigned n = operator_function_id_length (toks, 0, &code, &assign_p);
+      if (n == 0 || n != vec_safe_length (toks))
+	return throw_exception (loc, ctx,
+				"token sequence is not exactly one "
+				"operator-function-id",
+				fun, non_constant_p, jump_target);
+      maybe_init_meta_operators (loc);
+      tree id = ovl_op_identifier (assign_p, code);
+      int i = IDENTIFIER_ASSIGN_OP_P (id) ? 1 : 0;
+      int j = IDENTIFIER_CP_INDEX (id);
+      return build_int_cst (ret_type, meta_operators[i][j]);
+    }
   if (eval_is_operator_function (r) == boolean_false_node
       && eval_is_operator_function_template (r) == boolean_false_node)
     return throw_exception (loc, ctx,
@@ -8168,7 +8189,7 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
   switch (minfo->code)
     {
     case METAFN_OPERATOR_OF:
-      return eval_operator_of (loc, ctx, h, non_constant_p, jump_target,
+      return eval_operator_of (loc, ctx, h, kind, non_constant_p, jump_target,
 			       rettype, fun);
     case METAFN_SYMBOL_OF:
       return eval_symbol_of (loc, ctx, expr, non_constant_p, jump_target,
@@ -10139,13 +10160,112 @@ enum meta_token_kind {
   MTK_OPERATOR_FUNCTION_ID
 };
 
+/* If the tokens of TOKS starting at index I form an operator-function-id
+   whose operator has an enumerator in std::meta::operators (that is,
+   operator followed by an overloadable operator, such as operator +,
+   operator ( ), operator [ ] or operator new [ ]; not a
+   conversion-function-id or literal-operator-id), return the number of its
+   tokens and set *CODE and *ASSIGN_P as for ovl_op_identifier.  Otherwise
+   return 0.  */
+
+static unsigned
+operator_function_id_length (vec<cp_token, va_gc> *toks, unsigned i,
+			     tree_code *code, bool *assign_p)
+{
+  unsigned len = vec_safe_length (toks);
+  if (i + 1 >= len
+      || (*toks)[i].type != CPP_KEYWORD
+      || (*toks)[i].keyword != RID_OPERATOR)
+    return 0;
+  const cp_token *t = &(*toks)[i + 1];
+  auto next_is = [&] (unsigned k, cpp_ttype type)
+    {
+      return i + k < len && (*toks)[i + k].type == type;
+    };
+  *assign_p = false;
+  switch ((int) t->type)
+    {
+    case CPP_KEYWORD:
+      if (t->keyword == RID_NEW || t->keyword == RID_DELETE)
+	{
+	  bool vec = next_is (2, CPP_OPEN_SQUARE) && next_is (3, CPP_CLOSE_SQUARE);
+	  if (t->keyword == RID_NEW)
+	    *code = vec ? VEC_NEW_EXPR : NEW_EXPR;
+	  else
+	    *code = vec ? VEC_DELETE_EXPR : DELETE_EXPR;
+	  return vec ? 4 : 2;
+	}
+      if (t->keyword == RID_CO_AWAIT)
+	{
+	  *code = CO_AWAIT_EXPR;
+	  return 2;
+	}
+      return 0;
+    case CPP_OPEN_PAREN:
+      if (!next_is (2, CPP_CLOSE_PAREN))
+	return 0;
+      *code = CALL_EXPR;
+      return 3;
+    case CPP_OPEN_SQUARE:
+      if (!next_is (2, CPP_CLOSE_SQUARE))
+	return 0;
+      *code = ARRAY_REF;
+      return 3;
+    case CPP_PLUS: *code = PLUS_EXPR; break;
+    case CPP_MINUS: *code = MINUS_EXPR; break;
+    case CPP_MULT: *code = MULT_EXPR; break;
+    case CPP_DIV: *code = TRUNC_DIV_EXPR; break;
+    case CPP_MOD: *code = TRUNC_MOD_EXPR; break;
+    case CPP_XOR: *code = BIT_XOR_EXPR; break;
+    case CPP_AND: *code = BIT_AND_EXPR; break;
+    case CPP_OR: *code = BIT_IOR_EXPR; break;
+    case CPP_COMPL: *code = BIT_NOT_EXPR; break;
+    case CPP_NOT: *code = TRUTH_NOT_EXPR; break;
+    case CPP_EQ: *code = NOP_EXPR; *assign_p = true; break;
+    case CPP_LESS: *code = LT_EXPR; break;
+    case CPP_GREATER: *code = GT_EXPR; break;
+    case CPP_PLUS_EQ: *code = PLUS_EXPR; *assign_p = true; break;
+    case CPP_MINUS_EQ: *code = MINUS_EXPR; *assign_p = true; break;
+    case CPP_MULT_EQ: *code = MULT_EXPR; *assign_p = true; break;
+    case CPP_DIV_EQ: *code = TRUNC_DIV_EXPR; *assign_p = true; break;
+    case CPP_MOD_EQ: *code = TRUNC_MOD_EXPR; *assign_p = true; break;
+    case CPP_XOR_EQ: *code = BIT_XOR_EXPR; *assign_p = true; break;
+    case CPP_AND_EQ: *code = BIT_AND_EXPR; *assign_p = true; break;
+    case CPP_OR_EQ: *code = BIT_IOR_EXPR; *assign_p = true; break;
+    case CPP_LSHIFT: *code = LSHIFT_EXPR; break;
+    case CPP_RSHIFT: *code = RSHIFT_EXPR; break;
+    case CPP_LSHIFT_EQ: *code = LSHIFT_EXPR; *assign_p = true; break;
+    case CPP_RSHIFT_EQ: *code = RSHIFT_EXPR; *assign_p = true; break;
+    case CPP_EQ_EQ: *code = EQ_EXPR; break;
+    case CPP_NOT_EQ: *code = NE_EXPR; break;
+    case CPP_LESS_EQ: *code = LE_EXPR; break;
+    case CPP_GREATER_EQ: *code = GE_EXPR; break;
+    case CPP_SPACESHIP: *code = SPACESHIP_EXPR; break;
+    case CPP_AND_AND: *code = TRUTH_ANDIF_EXPR; break;
+    case CPP_OR_OR: *code = TRUTH_ORIF_EXPR; break;
+    case CPP_PLUS_PLUS: *code = POSTINCREMENT_EXPR; break;
+    case CPP_MINUS_MINUS: *code = PREDECREMENT_EXPR; break;
+    case CPP_COMMA: *code = COMPOUND_EXPR; break;
+    case CPP_DEREF_STAR: *code = MEMBER_REF; break;
+    case CPP_DEREF: *code = COMPONENT_REF; break;
+    default:
+      return 0;
+    }
+  return 2;
+}
+
 /* Return the number of tokens of the first element of the token sequence
-   TOKS starting at index I, in the sense of std::meta::tokens_of.  */
+   TOKS starting at index I, in the sense of std::meta::tokens_of: an
+   operator-function-id is a single element.  */
 
 static unsigned
 token_element_length (vec<cp_token, va_gc> *toks, unsigned i)
 {
   gcc_checking_assert (i < vec_safe_length (toks));
+  tree_code code;
+  bool assign_p;
+  if (unsigned n = operator_function_id_length (toks, i, &code, &assign_p))
+    return n;
   return 1;
 }
 
