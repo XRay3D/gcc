@@ -5843,6 +5843,156 @@ cp_parser_namespace_inject (tree ns, tree tokens, location_t loc)
   return errorcount == errors;
 }
 
+/* Definition tokens (-ftoken-injection).
+
+   The tokens of a function, class or namespace definition are copied, as
+   written, before the definition is parsed (parsing rewrites tokens in
+   place), so that std::meta::definition_tokens_of can return them.  This is
+   done for every definition with -fdefinition-tokens, for templates (whose
+   tokens EDG keeps anyway), for definitions with the retain_tokens
+   attribute, and for definitions nested in recorded ones.  */
+
+/* Map from a FUNCTION_DECL, class type or NAMESPACE_DECL to the
+   TOKEN_SEQUENCE of its definition (of all its definitions, for a
+   namespace).  */
+static GTY(()) hash_map<tree, tree> *definition_tokens_map;
+
+/* The nesting depth of recorded definitions being parsed.  */
+static int definition_recording_depth;
+
+/* Return the key for ENTITY in definition_tokens_map.  */
+
+static tree
+definition_tokens_key (tree entity)
+{
+  if (TYPE_P (entity))
+    return TYPE_MAIN_VARIANT (entity);
+  if (TREE_CODE (entity) == NAMESPACE_DECL)
+    return ORIGINAL_NAMESPACE (entity);
+  return entity;
+}
+
+/* Return true if the tokens of the definition of ENTITY (a FUNCTION_DECL,
+   class type or NAMESPACE_DECL) about to be parsed should be recorded.  */
+
+static bool
+definition_tokens_wanted_p (tree entity)
+{
+  if (!flag_token_injection)
+    return false;
+  if (flag_definition_tokens
+      || definition_recording_depth > 0
+      || processing_template_decl)
+    return true;
+  for (tree c = entity; c && c != global_namespace;
+       c = TYPE_P (c) ? CP_TYPE_CONTEXT (c) : CP_DECL_CONTEXT (c))
+    {
+      tree attrs = TYPE_P (c) ? TYPE_ATTRIBUTES (c) : DECL_ATTRIBUTES (c);
+      if (lookup_attribute ("retain_tokens", attrs))
+	return true;
+      if (c != entity && definition_tokens_map
+	  && definition_tokens_map->get (definition_tokens_key (c)))
+	return true;
+    }
+  return false;
+}
+
+/* Record the tokens [FIRST, LAST) as the tokens of the definition of
+   ENTITY.  Purged tokens and pragmas are left out.  */
+
+static void
+record_definition_tokens (tree entity, cp_token *first, cp_token *last)
+{
+  vec<cp_token, va_gc> *toks = NULL;
+  for (cp_token *p = first; p < last; ++p)
+    {
+      if (p->purged_p)
+	continue;
+      if (p->type == CPP_PRAGMA)
+	{
+	  while (p < last && p->type != CPP_PRAGMA_EOL)
+	    ++p;
+	  continue;
+	}
+      vec_safe_push (toks, *p);
+    }
+  tree key = definition_tokens_key (entity);
+  if (!definition_tokens_map)
+    definition_tokens_map = hash_map<tree, tree>::create_ggc (64);
+  tree *slot = definition_tokens_map->get (key);
+  if (slot && TREE_CODE (key) == NAMESPACE_DECL)
+    /* A namespace can be defined more than once.  */
+    vec_safe_splice (TOKEN_SEQUENCE_TOKENS (*slot), toks);
+  else
+    definition_tokens_map->put (key, make_token_sequence (toks));
+}
+
+/* Return the token after the '}' matching the '{' before FIRST, or the
+   CPP_EOF token that ends the buffer.  */
+
+static cp_token *
+cp_lexer_matching_close_brace (cp_token *first)
+{
+  int depth = 0;
+  cp_token *p;
+  for (p = first; p->type != CPP_EOF; ++p)
+    {
+      if (p->purged_p)
+	continue;
+      if (p->type == CPP_OPEN_BRACE)
+	++depth;
+      else if (p->type == CPP_CLOSE_BRACE && depth-- == 0)
+	break;
+    }
+  return p;
+}
+
+/* Return the token after the function-body (including a ctor-initializer
+   and the handlers of a function-try-block) that starts at the next token,
+   without consuming any token.  */
+
+static cp_token *
+cp_parser_function_body_end (cp_parser *parser)
+{
+  cp_lexer_save_tokens (parser->lexer);
+  bool function_try_block = false;
+  if (cp_lexer_next_token_is_keyword (parser->lexer, RID_TRY))
+    {
+      cp_lexer_consume_token (parser->lexer);
+      function_try_block = true;
+    }
+  if (cp_lexer_next_token_is (parser->lexer, CPP_COLON))
+    {
+      cp_lexer_consume_token (parser->lexer);
+      while (cp_lexer_next_token_is_not (parser->lexer, CPP_OPEN_BRACE))
+	{
+	  if (cp_parser_cache_group (parser, CPP_CLOSE_PAREN, /*depth=*/0))
+	    break;
+	  if (cp_lexer_next_token_is (parser->lexer, CPP_ELLIPSIS))
+	    cp_lexer_consume_token (parser->lexer);
+	}
+    }
+  cp_parser_cache_group (parser, CPP_CLOSE_BRACE, /*depth=*/0);
+  if (function_try_block)
+    while (cp_lexer_next_token_is_keyword (parser->lexer, RID_CATCH))
+      cp_parser_cache_group (parser, CPP_CLOSE_BRACE, /*depth=*/0);
+  cp_token *last = parser->lexer->next_token;
+  cp_lexer_rollback_tokens (parser->lexer);
+  return last;
+}
+
+/* Return the TOKEN_SEQUENCE recorded for the definition of ENTITY, a
+   FUNCTION_DECL, class type or NAMESPACE_DECL, or NULL_TREE.  */
+
+tree
+cp_definition_tokens (tree entity)
+{
+  if (!definition_tokens_map)
+    return NULL_TREE;
+  tree *slot = definition_tokens_map->get (definition_tokens_key (entity));
+  return slot ? *slot : NULL_TREE;
+}
+
 /* Parse a translation-unit.
 
    translation-unit:
@@ -25078,8 +25228,22 @@ cp_parser_namespace_definition (cp_parser* parser)
   matching_braces braces;
   if (braces.require_open (parser))
     {
+      /* With -ftoken-injection, record the tokens of the body.  */
+      bool recording_definition = false;
+      if (definition_tokens_wanted_p (current_namespace))
+	{
+	  cp_token *first = parser->lexer->next_token;
+	  record_definition_tokens (current_namespace, first,
+				    cp_lexer_matching_close_brace (first));
+	  recording_definition = true;
+	  ++definition_recording_depth;
+	}
+
       /* Parse the body of the namespace.  */
       cp_parser_namespace_body (parser);
+
+      if (recording_definition)
+	--definition_recording_depth;
 
       /* Look for the final `}'.  */
       braces.require_close (parser);
@@ -30376,12 +30540,26 @@ cp_parser_class_specifier (cp_parser* parser)
     }
   type = begin_class_definition (type);
 
+  /* With -ftoken-injection, record the tokens of the member-specification.  */
+  bool recording_definition = false;
+  if (type != error_mark_node && definition_tokens_wanted_p (type))
+    {
+      cp_token *first = parser->lexer->next_token;
+      record_definition_tokens (type, first,
+				cp_lexer_matching_close_brace (first));
+      recording_definition = true;
+      ++definition_recording_depth;
+    }
+
   if (type == error_mark_node)
     /* If the type is erroneous, skip the entire body of the class.  */
     cp_parser_skip_to_closing_brace (parser);
   else
     /* Parse the member-specification.  */
     cp_parser_member_specification_opt (parser);
+
+  if (recording_definition)
+    --definition_recording_depth;
 
   /* Register any "begin declare variant" functions in this class, since
      references to the base function can only be resolved after the
@@ -36756,6 +36934,19 @@ cp_parser_function_definition_after_declarator (cp_parser* parser,
 
   int errs = errorcount + sorrycount;
 
+  /* With -ftoken-injection, record the tokens of the definition.  */
+  bool recording_definition = false;
+  if (flag_token_injection
+      && current_function_decl
+      && definition_tokens_wanted_p (current_function_decl))
+    {
+      cp_token *first = parser->lexer->next_token;
+      record_definition_tokens (current_function_decl, first,
+				cp_parser_function_body_end (parser));
+      recording_definition = true;
+      ++definition_recording_depth;
+    }
+
   /* If the next token is `try', `__transaction_atomic', or
      `__transaction_relaxed`, then we are looking at either function-try-block
      or function-transaction-block.  Note that all of these include the
@@ -36770,6 +36961,9 @@ cp_parser_function_definition_after_declarator (cp_parser* parser,
   else
     cp_parser_ctor_initializer_opt_and_function_body
       (parser, /*in_function_try_block=*/false);
+
+  if (recording_definition)
+    --definition_recording_depth;
 
   /* Finish the function.  */
   fn = finish_function (inline_p);

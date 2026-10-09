@@ -1276,6 +1276,9 @@ c_common_post_options (const char **pfilename)
   if (flag_token_injection && !flag_reflection)
     error ("%<-ftoken-injection%> requires %<-freflection%>");
 
+  if (flag_definition_tokens && !flag_token_injection)
+    error ("%<-fdefinition-tokens%> requires %<-ftoken-injection%>");
+
   if (num_in_fnames > 1)
     error ("too many filenames given; type %<%s %s%> for usage",
 	   progname, "--help");

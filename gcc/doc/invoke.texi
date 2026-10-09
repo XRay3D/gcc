@@ -250,6 +250,7 @@ in the following sections.
 -fno-nonansi-builtins  -fnothrow-opt  -fno-operator-names
 -fno-optional-diags
 -fno-pretty-templates  -frange-for-ext-temps  -freflection  -ftoken-injection
+-fdefinition-tokens
 -fno-rtti  -fsized-deallocation
 -fstrict-enums  -fstrong-eval-order@r{[}=@var{kind}@r{]}
 -ftemplate-backtrace-limit=@var{n}
@@ -3732,6 +3733,16 @@ namespace immediately.  Injection from a @code{consteval} block in a
 template instantiation is not supported yet.  The macro
 @code{__GXX_TOKEN_INJECTION__} is defined.  This option requires
 @option{-freflection}.
+
+@opindex fdefinition-tokens
+@item -fdefinition-tokens
+With @option{-ftoken-injection}, record the tokens of every function, class
+and namespace definition, so that @code{std::meta::definition_tokens_of}
+can return them.  Without this option, the tokens are recorded only for
+templates and for definitions with the @code{gnu::retain_tokens} (or
+@code{edg::retain_tokens}) attribute, and for definitions nested in
+recorded ones.  Recording every definition, including those in the
+standard library headers, costs memory.
 
 @opindex fno-rtti
 @opindex frtti

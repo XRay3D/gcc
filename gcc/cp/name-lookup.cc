@@ -6860,6 +6860,19 @@ handle_namespace_attrs (tree ns, tree attributes)
 	    DECL_ATTRIBUTES (ns) = tree_cons (name, args,
 					      DECL_ATTRIBUTES (ns));
 	}
+      else if (is_attribute_p ("retain_tokens", name)
+	       && (is_attribute_namespace_p ("gnu", d)
+		   || is_attribute_namespace_p ("edg", d)))
+	{
+	  /* -ftoken-injection: record the tokens of the definitions of the
+	     namespace for std::meta::definition_tokens_of.  */
+	  if (!flag_token_injection)
+	    warning (OPT_Wattributes, "%qD attribute ignored without "
+		     "%<-ftoken-injection%>", name);
+	  else
+	    DECL_ATTRIBUTES (ns) = tree_cons (TREE_PURPOSE (d), args,
+					      DECL_ATTRIBUTES (ns));
+	}
       else if (annotation_p (d))
 	{
 	  const attribute_spec *as = lookup_attribute_spec (TREE_PURPOSE (d));

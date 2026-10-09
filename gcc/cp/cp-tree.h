@@ -8889,6 +8889,7 @@ extern bool is_byte_access_type			(tree);
 extern bool is_byte_access_type_not_plain_char	(tree);
 extern const struct scoped_attribute_specs cxx_gnu_attribute_table;
 extern const struct scoped_attribute_specs std_attribute_table;
+extern const struct scoped_attribute_specs edg_attribute_table;
 extern const struct scoped_attribute_specs internal_attribute_table;
 extern tree make_ptrmem_cst			(tree, tree);
 extern tree cp_build_type_attribute_variant     (tree, tree);
@@ -9558,6 +9559,7 @@ extern unsigned cp_parser_injection_mark ();
 extern void cp_parser_discard_injections (unsigned);
 extern bool cp_parser_injection_possible_p ();
 extern bool cp_parser_namespace_inject (tree, tree, location_t);
+extern tree cp_definition_tokens (tree);
 
 /* In reflect.cc */
 extern void init_reflection ();

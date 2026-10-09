@@ -150,6 +150,7 @@ static constexpr cp_feature_info cp_feature_table[] =
   { "cxx_variable_templates", cxx14 },
   { "modules", &flag_modules },
   { "token_injection", &flag_token_injection },
+  { "definition_tokens", &flag_definition_tokens },
 };
 
 /* Register C++ language features for __has_{feature,extension}.  */

@@ -31489,6 +31489,16 @@ decltype(auto) foo(T&& t) @{
 @};
 @end smallexample
 
+@atindex @code{retain_tokens}
+@item retain_tokens
+With @option{-ftoken-injection}, the @code{retain_tokens} attribute on a
+function, class or namespace definition records the tokens of the
+definition, and of the definitions nested in it, so that
+@code{std::meta::definition_tokens_of} can return them; see
+@option{-fdefinition-tokens}.  The attribute of a prior declaration
+applies to the definition.  For compatibility with the EDG front end,
+the attribute can also be spelled @code{[[edg::retain_tokens]]}.
+
 @atindex @code{warn_unused}
 @item warn_unused
 This attribute applies to types.

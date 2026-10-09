@@ -5586,6 +5586,32 @@ handle_indeterminate_attribute (tree *node, tree name, tree, int,
   return NULL_TREE;
 }
 
+/* Handle a "retain_tokens" attribute (-ftoken-injection): the tokens of the
+   definition of the function or class are recorded for
+   std::meta::definition_tokens_of.  Namespaces are handled in
+   handle_namespace_attrs.  */
+
+static tree
+handle_retain_tokens_attribute (tree *node, tree name, tree, int,
+				bool *no_add_attrs)
+{
+  if (!flag_token_injection)
+    {
+      warning (OPT_Wattributes, "%qE attribute ignored without "
+	       "%<-ftoken-injection%>", name);
+      *no_add_attrs = true;
+    }
+  else if (TREE_CODE (*node) != FUNCTION_DECL
+	   && TREE_CODE (*node) != TEMPLATE_DECL
+	   && !(TYPE_P (*node) && CLASS_TYPE_P (*node)))
+    {
+      warning (OPT_Wattributes, "%qE attribute only applies to functions, "
+	       "classes and namespaces", name);
+      *no_add_attrs = true;
+    }
+  return NULL_TREE;
+}
+
 /* Table of valid C++ attributes.  */
 static const attribute_spec cxx_gnu_attributes[] =
 {
@@ -5597,11 +5623,26 @@ static const attribute_spec cxx_gnu_attributes[] =
     handle_abi_tag_attribute, NULL },
   { "no_dangling", 0, 1, false, true, false, false,
     handle_no_dangling_attribute, NULL },
+  { "retain_tokens", 0, 0, false, false, false, false,
+    handle_retain_tokens_attribute, NULL },
 };
 
 const scoped_attribute_specs cxx_gnu_attribute_table =
 {
   "gnu", { cxx_gnu_attributes }
+};
+
+/* Table of attributes in the edg namespace, accepted for compatibility
+   with the EDG front end.  */
+static const attribute_spec edg_attributes[] =
+{
+  { "retain_tokens", 0, 0, false, false, false, false,
+    handle_retain_tokens_attribute, NULL },
+};
+
+const scoped_attribute_specs edg_attribute_table =
+{
+  "edg", { edg_attributes }
 };
 
 /* Table of C++ standard attributes.  */

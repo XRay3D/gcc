@@ -445,6 +445,9 @@ static tree eval_token_value_of (location_t, const constexpr_ctx *, tree,
 				 reflect_kind, bool *, tree *, tree);
 static tree eval_token_location_of (location_t, const constexpr_ctx *, tree,
 				    reflect_kind, bool *, tree *, tree, tree);
+static tree eval_definition_tokens_of (location_t, const constexpr_ctx *,
+				       tree, reflect_kind, bool *, tree *,
+				       tree);
 static tree reflect_current_scope (location_t, const constexpr_ctx *, tree,
 				   bool *, const char *);
 
@@ -8494,6 +8497,9 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
     case METAFN_TOKEN_LOCATION_OF:
       return eval_token_location_of (loc, ctx, h, kind, non_constant_p,
 				     jump_target, rettype, fun);
+    case METAFN_DEFINITION_TOKENS_OF:
+      return eval_definition_tokens_of (loc, ctx, h, kind, non_constant_p,
+					jump_target, fun);
     case METAFN_DEFINE_AGGREGATE:
       return eval_define_aggregate (loc, ctx, h, hvec, call, non_constant_p);
     case METAFN_IS_VOID_TYPE:
@@ -10490,6 +10496,77 @@ eval_token_location_of (location_t loc, const constexpr_ctx *ctx, tree r,
   if (*jump_target || *non_constant_p)
     return NULL_TREE;
   return eval_source_location_of (loc, r, kind, ret_type);
+}
+
+/* Return the entity whose recorded definition tokens
+   std::meta::definition_tokens_of returns for the reflection handle R: a
+   function, class or namespace, or the template a specialization was
+   instantiated from.  Returns NULL_TREE if R reflects something else.  */
+
+static tree
+definition_tokens_entity (tree r)
+{
+  r = maybe_get_first_fn (r);
+  if (TREE_CODE (r) == TEMPLATE_DECL)
+    {
+      tree res = DECL_TEMPLATE_RESULT (r);
+      r = TREE_CODE (res) == TYPE_DECL ? TREE_TYPE (res) : res;
+    }
+  if (TREE_CODE (r) == FUNCTION_DECL)
+    {
+      if (DECL_LANG_SPECIFIC (r)
+	  && DECL_TEMPLATE_INFO (r)
+	  && DECL_TEMPLATE_INSTANTIATION (r))
+	r = DECL_TEMPLATE_RESULT (template_for_substitution (r));
+      return r;
+    }
+  if (CLASS_TYPE_P (r))
+    {
+      r = TYPE_MAIN_VARIANT (r);
+      if (CLASSTYPE_TEMPLATE_INSTANTIATION (r))
+	{
+	  /* Instantiate the class to determine the partial specialization
+	     it comes from.  */
+	  complete_type (r);
+	  tree ti = CLASSTYPE_TEMPLATE_INFO (r);
+	  tree tmpl = TI_TEMPLATE (ti);
+	  if (PRIMARY_TEMPLATE_P (tmpl) && TI_PARTIAL_INFO (ti))
+	    tmpl = TI_TEMPLATE (TI_PARTIAL_INFO (ti));
+	  else
+	    tmpl = most_general_template (tmpl);
+	  r = TREE_TYPE (DECL_TEMPLATE_RESULT (tmpl));
+	}
+      return r;
+    }
+  if (TREE_CODE (r) == NAMESPACE_DECL && r != global_namespace)
+    return ORIGINAL_NAMESPACE (r);
+  return NULL_TREE;
+}
+
+/* Process std::meta::definition_tokens_of.
+   Returns: a token sequence holding the tokens of the definition of the
+   function (its function-body, including a ctor-initializer and the
+   handlers of a function-try-block), class (its member-specification) or
+   namespace (the declarations of all its definitions) reflected by r; for
+   a specialization of a template, the tokens of the template.
+   Throws: meta::exception if the tokens were not recorded: they are
+   recorded for templates, with -fdefinition-tokens, or with the
+   retain_tokens attribute.  */
+
+static tree
+eval_definition_tokens_of (location_t loc, const constexpr_ctx *ctx,
+			   tree r, reflect_kind kind, bool *non_constant_p,
+			   tree *jump_target, tree fun)
+{
+  tree entity = (kind == REFLECT_UNDEF ? definition_tokens_entity (r)
+		 : NULL_TREE);
+  tree ts = entity ? cp_definition_tokens (entity) : NULL_TREE;
+  if (ts == NULL_TREE)
+    return throw_exception (loc, ctx, "the tokens of the definition are not "
+			    "available; they are recorded only for templates, "
+			    "with -fdefinition-tokens or with the retain_tokens "
+			    "attribute", fun, non_constant_p, jump_target);
+  return get_reflection_raw (loc, ts, REFLECT_TOKENS);
 }
 
 /* Process std::meta::is_token_sequence.

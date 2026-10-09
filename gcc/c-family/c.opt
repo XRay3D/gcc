@@ -2365,6 +2365,10 @@ ftoken-injection
 C++ ObjC++ Var(flag_token_injection) Init(0)
 Enable experimental token sequences and token injection (P3294); requires -freflection.
 
+fdefinition-tokens
+C++ ObjC++ Var(flag_definition_tokens) Init(0)
+Record the tokens of every function, class and namespace definition for std::meta::definition_tokens_of; requires -ftoken-injection.
+
 freplace-objc-classes
 ObjC ObjC++ LTO Var(flag_replace_objc_classes)
 Used in Fix-and-Continue mode to indicate that object files may be swapped in at runtime.
