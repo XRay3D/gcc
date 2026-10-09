@@ -3724,8 +3724,14 @@ braces; only braces need to balance.  The interpolators
 of the reflection @var{r}), @code{\@{ @var{ts} @}} (the tokens of the
 token sequence @var{ts}), @code{\val(@var{e})} (the value @var{e}) and
 @code{\str(@var{s})} (a string literal) are evaluated when the expression
-is constant-evaluated.  The macro @code{__GXX_TOKEN_INJECTION__} is
-defined.  This option requires @option{-freflection}.
+is constant-evaluated.  From a @code{consteval} block,
+@code{std::meta::queue_injection} injects a token sequence into an
+enclosing namespace, class being defined or function body once the block
+is complete, and @code{std::meta::namespace_inject} injects one into a
+namespace immediately.  Injection from a @code{consteval} block in a
+template instantiation is not supported yet.  The macro
+@code{__GXX_TOKEN_INJECTION__} is defined.  This option requires
+@option{-freflection}.
 
 @opindex fno-rtti
 @opindex frtti

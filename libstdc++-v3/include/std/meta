@@ -607,6 +607,25 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     consteval bool is_token_sequence(info);
     consteval bool is_empty_token_sequence(info);
 
+    consteval info nearest_token_queuing_context();
+    consteval info nearest_class_or_namespace();
+    consteval info nearest_namespace();
+
+    consteval void __report_tokens(info);
+
+    // Inject the tokens into the namespace, class or function body when
+    // the enclosing consteval block is complete.
+    consteval void queue_injection(info, info);
+    consteval void
+    queue_injection(info __tokens)
+    { queue_injection(nearest_token_queuing_context(), __tokens); }
+
+    // Inject the tokens into the namespace immediately.
+    consteval void namespace_inject(info, info);
+    consteval void
+    namespace_inject(info __tokens)
+    { namespace_inject(nearest_namespace(), __tokens); }
+
     // Accumulates a token sequence in which the pieces added with += are
     // separated by the given separator, a comma by default.
     struct list_builder

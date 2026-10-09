@@ -5491,6 +5491,358 @@ finish_userdef_string_literal (tree literal)
 
 /* Basic concepts [gram.basic]  */
 
+/* Token injection (P3294, -ftoken-injection).
+
+   std::meta::queue_injection records a request to inject a token sequence
+   into an enclosing namespace, class or function body; the request is
+   carried out when the parser gets back to a declaration-seq,
+   member-specification or statement-seq of that scope: the parser loops
+   call cp_parser_injection_boundary before each declaration, member or
+   statement.  The tokens are then pushed as a new lexer on top of the
+   parser's lexer stack, followed by a CPP_EOF token, and parsed by the same
+   loop until they are exhausted.  std::meta::namespace_inject parses the
+   tokens immediately (cp_parser_namespace_inject).  */
+
+/* A request to inject tokens, made by std::meta::queue_injection.  */
+
+struct GTY(()) cp_pending_injection {
+  /* The NAMESPACE_DECL, class type or FUNCTION_DECL to inject into.  */
+  tree target;
+  /* The TOKEN_SEQUENCE.  */
+  tree tokens;
+  /* The location of the consteval block that made the request.  */
+  location_t loc;
+  /* The serial number of the request.  */
+  unsigned seq;
+};
+
+/* The pending requests, in the order they were made.  */
+static GTY(()) vec<cp_pending_injection, va_gc> *pending_injections;
+
+/* A token sequence that is being parsed.  */
+
+struct GTY(()) cp_active_injection {
+  /* The lexer holding the tokens.  */
+  cp_lexer *lexer;
+  /* The access specifier in effect when the injection started.  */
+  tree saved_access;
+  /* The location of the consteval block that requested the injection.  */
+  location_t loc;
+  /* Only injections requested while these tokens are parsed (with a serial
+     number not less than START_SEQ) may start before they are exhausted.  */
+  unsigned start_seq;
+  /* The nesting depth of the parser loop the tokens are injected into.  */
+  int depth;
+  /* The number of errors when the injection started.  */
+  int errors;
+  /* What the tokens are parsed as, a cp_injection_kind.  */
+  int kind;
+  /* True for std::meta::namespace_inject, whose caller pops the lexer.  */
+  bool sync;
+};
+
+/* The token sequences being parsed, innermost last.  */
+static GTY(()) vec<cp_active_injection, va_gc> *active_injections;
+
+/* Token buffers of finished injections.  Member function bodies, default
+   arguments and the like in injected tokens are saved as token caches
+   pointing into the buffer and parsed later, so it must stay alive.  */
+static GTY(()) vec<tree, va_gc> *injected_token_buffers;
+
+/* The serial number of the last request.  */
+static unsigned injection_seq;
+
+/* The nesting depth of the parser loops that can parse injected tokens.  */
+static int injection_loop_depth;
+
+/* What injected tokens are parsed as.  */
+
+enum cp_injection_kind {
+  CP_INJECT_DECLARATION,
+  CP_INJECT_MEMBER,
+  CP_INJECT_STATEMENT
+};
+
+/* RAII class to track the nesting of the parser loops that can parse
+   injected tokens.  */
+
+class injection_loop_sentinel {
+public:
+  injection_loop_sentinel () { ++injection_loop_depth; }
+  ~injection_loop_sentinel () { --injection_loop_depth; }
+};
+
+/* Push a lexer holding a copy of the tokens of the TOKEN_SEQUENCE TS,
+   followed by a CPP_EOF token, on top of PARSER's lexer stack.  The copy
+   is needed because parsing rewrites tokens in place.  */
+
+static void
+cp_parser_push_injected_tokens (cp_parser *parser, tree ts, location_t loc)
+{
+  vec<cp_token, va_gc> *toks = TOKEN_SEQUENCE_TOKENS (ts);
+  cp_lexer *lexer = cp_lexer_alloc ();
+  lexer->debugging_p = parser->lexer->debugging_p;
+  vec_safe_reserve (lexer->buffer, vec_safe_length (toks) + 1, true);
+  unsigned i;
+  cp_token *t;
+  FOR_EACH_VEC_SAFE_ELT (toks, i, t)
+    lexer->buffer->quick_push (*t);
+  cp_token eof = {};
+  eof.type = CPP_EOF;
+  eof.keyword = RID_MAX;
+  eof.location = vec_safe_is_empty (toks) ? loc : toks->last ().location;
+  lexer->buffer->quick_push (eof);
+  lexer->next = parser->lexer;
+  lexer->next_token = lexer->buffer->address ();
+  lexer->last_token = lexer->next_token + lexer->buffer->length () - 1;
+  parser->lexer = lexer;
+  cp_lexer_set_source_position_from_token (lexer->next_token);
+}
+
+/* Pop the lexer pushed by cp_parser_push_injected_tokens.  */
+
+static void
+cp_parser_pop_injected_tokens (cp_parser *parser)
+{
+  cp_lexer *lexer = parser->lexer;
+  parser->lexer = lexer->next;
+  vec_safe_push (injected_token_buffers, make_token_sequence (lexer->buffer));
+  lexer->buffer = NULL;
+  lexer->saved_tokens.release ();
+  ggc_free (lexer);
+  cp_lexer_set_source_position_from_token (parser->lexer->next_token);
+}
+
+/* Return the name of what tokens of KIND are parsed as.  */
+
+static const char *
+injection_kind_name (int kind)
+{
+  switch (kind)
+    {
+    case CP_INJECT_DECLARATION: return G_("declarations");
+    case CP_INJECT_MEMBER: return G_("member declarations");
+    default: return G_("statements");
+    }
+}
+
+/* Return true if a request to inject tokens into TARGET can be carried out
+   by the parser loop of KIND that is being run.  */
+
+static bool
+injection_target_matches_p (tree target, cp_injection_kind kind)
+{
+  switch (kind)
+    {
+    case CP_INJECT_DECLARATION:
+      return target == current_namespace;
+    case CP_INJECT_MEMBER:
+      return (TYPE_P (target) && current_class_type
+	      && (TYPE_MAIN_VARIANT (target)
+		  == TYPE_MAIN_VARIANT (current_class_type)));
+    case CP_INJECT_STATEMENT:
+      return target == current_function_decl;
+    }
+  gcc_unreachable ();
+}
+
+/* Called by a parser loop of KIND before it parses the next declaration,
+   member or statement.  Finish the injection whose tokens are exhausted,
+   or start a pending one.  Returns true if it did either, in which case
+   the loop should look at the next token again.  */
+
+static bool
+cp_parser_injection_boundary (cp_parser *parser, cp_injection_kind kind)
+{
+  if (!flag_token_injection)
+    return false;
+
+  unsigned min_seq = 0;
+  if (!vec_safe_is_empty (active_injections))
+    {
+      cp_active_injection &a = active_injections->last ();
+      min_seq = a.start_seq;
+      if (a.lexer == parser->lexer && a.depth == injection_loop_depth)
+	{
+	  cp_token *tok = cp_lexer_peek_token (parser->lexer);
+	  if (tok->type == CPP_CLOSE_BRACE)
+	    {
+	      auto_diagnostic_group d;
+	      error_at (tok->location, "extraneous tokens in token sequence "
+			"injected as %s", _(injection_kind_name (a.kind)));
+	      inform (a.loc, "in token sequence injected here");
+	      a.errors = errorcount;
+	      while (!cp_lexer_next_token_is (parser->lexer, CPP_EOF))
+		cp_lexer_consume_token (parser->lexer);
+	      tok = cp_lexer_peek_token (parser->lexer);
+	    }
+	  if (tok->type == CPP_EOF && !a.sync)
+	    {
+	      if (errorcount > a.errors)
+		inform (a.loc, "in token sequence injected here");
+	      if (a.kind == CP_INJECT_MEMBER)
+		current_access_specifier = a.saved_access;
+	      cp_parser_pop_injected_tokens (parser);
+	      active_injections->pop ();
+	      return true;
+	    }
+	}
+    }
+
+  if (vec_safe_is_empty (pending_injections)
+      || cp_parser_uncommitted_to_tentative_parse_p (parser))
+    return false;
+
+  for (unsigned i = 0; i < pending_injections->length (); ++i)
+    {
+      cp_pending_injection p = (*pending_injections)[i];
+      if (p.seq < min_seq || !injection_target_matches_p (p.target, kind))
+	continue;
+      pending_injections->ordered_remove (i);
+      cp_active_injection a = {};
+      a.saved_access = current_access_specifier;
+      a.loc = p.loc;
+      a.start_seq = injection_seq + 1;
+      a.depth = injection_loop_depth;
+      a.errors = errorcount;
+      a.kind = kind;
+      cp_parser_push_injected_tokens (parser, p.tokens, p.loc);
+      a.lexer = parser->lexer;
+      vec_safe_push (active_injections, a);
+      return true;
+    }
+  return false;
+}
+
+/* Record a request by the consteval block at LOC to inject the
+   TOKEN_SEQUENCE TOKENS into TARGET, a NAMESPACE_DECL, a class type or a
+   FUNCTION_DECL.  */
+
+void
+cp_parser_queue_injection (tree target, tree tokens, location_t loc)
+{
+  cp_pending_injection p;
+  p.target = target;
+  p.tokens = tokens;
+  p.loc = loc;
+  p.seq = ++injection_seq;
+  vec_safe_push (pending_injections, p);
+}
+
+/* Return a mark for cp_parser_discard_injections: the serial number of the
+   last request.  */
+
+unsigned
+cp_parser_injection_mark ()
+{
+  return injection_seq;
+}
+
+/* Discard the pending requests made after MARK, because the consteval block
+   that made them was not a constant expression.  */
+
+void
+cp_parser_discard_injections (unsigned mark)
+{
+  if (!pending_injections)
+    return;
+  for (unsigned i = pending_injections->length (); i-- > 0; )
+    if ((*pending_injections)[i].seq > mark)
+      pending_injections->ordered_remove (i);
+}
+
+/* Return true if tokens can be injected now: the parser is not in the
+   middle of a tentative parse that might be rolled back.  */
+
+bool
+cp_parser_injection_possible_p ()
+{
+  if (!the_parser)
+    return false;
+  for (cp_parser_context *c = the_parser->context; c && c->next; c = c->next)
+    if (c->status != CP_PARSER_STATUS_KIND_COMMITTED)
+      return false;
+  return true;
+}
+
+/* Parse the tokens of the TOKEN_SEQUENCE TOKENS as declarations in the
+   namespace NS (std::meta::namespace_inject from the consteval block at
+   LOC).  Returns false if they were ill-formed.  */
+
+bool
+cp_parser_namespace_inject (tree ns, tree tokens, location_t loc)
+{
+  cp_parser *parser = the_parser;
+  cp_parser saved = *parser;
+  int errors = errorcount;
+
+  /* Parse as at namespace scope.  */
+  push_nested_namespace (ns);
+  parser->scope = NULL_TREE;
+  parser->object_scope = NULL_TREE;
+  parser->qualifying_scope = NULL_TREE;
+  parser->context = cp_parser_context_new (NULL);
+  parser->greater_than_is_operator_p = true;
+  parser->default_arg_ok_p = true;
+  parser->integral_constant_expression_p = false;
+  parser->allow_non_integral_constant_expression_p = false;
+  parser->non_integral_constant_expression_p = false;
+  parser->local_variables_forbidden_p = 0;
+  parser->in_unbraced_linkage_specification_p = false;
+  parser->in_unbraced_export_declaration_p = false;
+  parser->in_declarator_p = false;
+  parser->in_template_argument_list_p = false;
+  parser->in_statement = 0;
+  parser->in_switch_statement_p = false;
+  parser->in_type_id_in_expr_p = false;
+  parser->translate_strings_p = true;
+  parser->in_function_body = false;
+  parser->in_transaction = 0;
+  parser->colon_corrects_to_scope_p = true;
+  parser->colon_doesnt_start_class_def_p = false;
+  parser->type_definition_forbidden_message = NULL;
+  parser->num_classes_being_defined = 0;
+  parser->num_template_parameter_lists = 0;
+  parser->auto_is_implicit_function_template_parm_p = false;
+  parser->fully_implicit_function_template_p = false;
+  parser->implicit_template_parms = NULL_TREE;
+  parser->implicit_template_scope = NULL;
+  parser->prevent_constrained_type_specifiers = 0;
+  push_unparsed_function_queues (parser);
+
+  cp_parser_push_injected_tokens (parser, tokens, loc);
+  cp_active_injection a = {};
+  a.lexer = parser->lexer;
+  a.loc = loc;
+  a.start_seq = injection_seq + 1;
+  a.depth = injection_loop_depth + 1;
+  a.errors = errorcount;
+  a.kind = CP_INJECT_DECLARATION;
+  a.sync = true;
+  vec_safe_push (active_injections, a);
+
+  cp_parser_declaration_seq_opt (parser);
+  if (!cp_lexer_next_token_is (parser->lexer, CPP_EOF))
+    {
+      auto_diagnostic_group d;
+      error_at (cp_lexer_peek_token (parser->lexer)->location,
+		"extraneous tokens in token sequence injected as %s",
+		_(injection_kind_name (CP_INJECT_DECLARATION)));
+      inform (loc, "in token sequence injected here");
+      while (!cp_lexer_next_token_is (parser->lexer, CPP_EOF))
+	cp_lexer_consume_token (parser->lexer);
+    }
+  else if (errorcount > errors)
+    inform (loc, "in token sequence injected here");
+
+  active_injections->pop ();
+  cp_parser_pop_injected_tokens (parser);
+  pop_unparsed_function_queues (parser);
+  pop_nested_namespace (ns);
+  *parser = saved;
+  return errorcount == errors;
+}
+
 /* Parse a translation-unit.
 
    translation-unit:
@@ -5519,6 +5871,7 @@ cp_parser_translation_unit (cp_parser* parser)
     mp_state = MP_FIRST;
 
   bool implicit_extern_c = false;
+  injection_loop_sentinel ils;
 
   /* Parse until EOF.  */
   for (;;)
@@ -5537,6 +5890,9 @@ cp_parser_translation_unit (cp_parser* parser)
 	  else
 	    pop_lang_context ();
 	}
+
+      if (cp_parser_injection_boundary (parser, CP_INJECT_DECLARATION))
+	continue;
 
       if (token->type == CPP_EOF)
 	break;
@@ -15197,10 +15553,14 @@ cp_parser_statement_seq_opt (cp_parser* parser, tree in_statement_expr)
     = parser->omp_for_parse_state;
   bool in_omp_loop_block
     = omp_for_parse_state ? omp_for_parse_state->want_nested_loop : false;
+  injection_loop_sentinel ils;
 
   /* Scan statements until there aren't any more.  */
   while (true)
     {
+      if (cp_parser_injection_boundary (parser, CP_INJECT_STATEMENT))
+	continue;
+
       cp_token *token = cp_lexer_peek_token (parser->lexer);
 
       /* If we are looking at a `}', then we have run out of
@@ -17677,9 +18037,13 @@ cp_parser_declaration_seq_opt (cp_parser* parser)
      or export-declaration anymore.  */
   parser->in_unbraced_linkage_specification_p = false;
   parser->in_unbraced_export_declaration_p = false;
+  injection_loop_sentinel ils;
 
   while (true)
     {
+      if (cp_parser_injection_boundary (parser, CP_INJECT_DECLARATION))
+	continue;
+
       cp_token *token = cp_lexer_peek_token (parser->lexer);
 
       if (token->type == CPP_CLOSE_BRACE
@@ -18016,6 +18380,10 @@ static void
 cp_parser_consteval_block (cp_parser *parser, bool member_p)
 {
   const location_t loc = cp_lexer_peek_token (parser->lexer)->location;
+  /* A consteval block is unambiguous.  Commit to it, so that the tokens it
+     injects (-ftoken-injection) are not lost by a rollback.  */
+  if (flag_token_injection && cp_parser_parsing_tentatively (parser))
+    cp_parser_commit_to_topmost_tentative_parse (parser);
   /* Consume the 'consteval'.  */
   cp_lexer_consume_token (parser->lexer);
 
@@ -31071,10 +31439,15 @@ cp_parser_type_parameter_key (cp_parser* parser)
 static void
 cp_parser_member_specification_opt (cp_parser* parser)
 {
+  injection_loop_sentinel ils;
+
   while (true)
     {
       cp_token *token;
       enum rid keyword;
+
+      if (cp_parser_injection_boundary (parser, CP_INJECT_MEMBER))
+	continue;
 
       /* Peek at the next token.  */
       token = cp_lexer_peek_token (parser->lexer);

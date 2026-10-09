@@ -9552,6 +9552,13 @@ extern tree co_await_get_resume_call		(tree await_expr);
 extern void coro_set_transform_functions	(tree, tree, tree);
 extern void coro_set_ramp_function		(tree, tree);
 
+/* In parser.cc */
+extern void cp_parser_queue_injection (tree, tree, location_t);
+extern unsigned cp_parser_injection_mark ();
+extern void cp_parser_discard_injections (unsigned);
+extern bool cp_parser_injection_possible_p ();
+extern bool cp_parser_namespace_inject (tree, tree, location_t);
+
 /* In reflect.cc */
 extern void init_reflection ();
 extern tree maybe_update_function_parm (tree);

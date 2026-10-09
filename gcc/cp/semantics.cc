@@ -13108,7 +13108,11 @@ finish_static_assert (tree condition, tree message, location_t location,
   /* Evaluate the consteval { }.  This must be done only once.  */
   if (consteval_block_p)
     {
-      cxx_constant_value (condition);
+      /* If the block is not a constant expression, the tokens it asked
+	 to inject (-ftoken-injection) are not injected.  */
+      unsigned mark = cp_parser_injection_mark ();
+      if (cxx_constant_value (condition) == error_mark_node)
+	cp_parser_discard_injections (mark);
       return;
     }
 

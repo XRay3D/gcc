@@ -418,6 +418,25 @@ static tree throw_exception (location_t, const constexpr_ctx *, const char *,
 static tree eval_is_token_sequence (reflect_kind);
 static tree eval_is_empty_token_sequence (tree, reflect_kind);
 
+/* Kinds of std::meta::nearest_* metafunctions.  */
+
+enum nearest_context_kind {
+  NEAREST_TOKEN_QUEUING_CONTEXT,
+  NEAREST_CLASS_OR_NAMESPACE,
+  NEAREST_NAMESPACE
+};
+
+static tree eval_nearest_context (location_t, const constexpr_ctx *, tree,
+				  bool *, nearest_context_kind);
+static tree eval_queue_injection (location_t, const constexpr_ctx *, tree,
+				  tree, reflect_kind, bool *, tree);
+static tree eval_namespace_inject (location_t, const constexpr_ctx *, tree,
+				   tree, reflect_kind, bool *, tree);
+static tree eval_report_tokens (location_t, const constexpr_ctx *, tree,
+				reflect_kind, bool *, tree);
+static tree reflect_current_scope (location_t, const constexpr_ctx *, tree,
+				   bool *, const char *);
+
 /* Helper function for get_range_elts, handle adjustment of ARRAY_TYPE elts
    of a retvec.  */
 
@@ -7974,6 +7993,10 @@ check_metafn_return_type (location_t loc, metafn_kind_ret kind, tree type,
       break;
     case METAFN_KIND_RET_TEMPLATE_PARM:
       break;
+    case METAFN_KIND_RET_VOID:
+      if (!VOID_TYPE_P (type))
+	expected = void_type_node;
+      break;
     }
   if (expected || expected_str)
     {
@@ -8011,7 +8034,7 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
     }
   tree h = NULL_TREE, h1 = NULL_TREE, hvec = NULL_TREE, expr = NULL_TREE;
   tree type = NULL_TREE, ht, info;
-  reflect_kind kind = REFLECT_UNDEF;
+  reflect_kind kind = REFLECT_UNDEF, kind1 = REFLECT_UNDEF;
   tree rettype;
   if (TREE_CODE (call) == AGGR_INIT_EXPR)
     rettype = TREE_TYPE (AGGR_INIT_EXPR_SLOT (call));
@@ -8056,7 +8079,10 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
 	    h = ht;
 	  }
 	else
-	  h1 = ht;
+	  {
+	    kind1 = REFLECT_EXPR_KIND (info);
+	    h1 = ht;
+	  }
 	break;
       case METAFN_KIND_ARG_REFLECTION_RANGE:
 	gcc_assert (argno == 1);
@@ -8405,6 +8431,23 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
       return eval_is_token_sequence (kind);
     case METAFN_IS_EMPTY_TOKEN_SEQUENCE:
       return eval_is_empty_token_sequence (h, kind);
+    case METAFN_NEAREST_TOKEN_QUEUING_CONTEXT:
+      return eval_nearest_context (loc, ctx, call, non_constant_p,
+				   NEAREST_TOKEN_QUEUING_CONTEXT);
+    case METAFN_NEAREST_CLASS_OR_NAMESPACE:
+      return eval_nearest_context (loc, ctx, call, non_constant_p,
+				   NEAREST_CLASS_OR_NAMESPACE);
+    case METAFN_NEAREST_NAMESPACE:
+      return eval_nearest_context (loc, ctx, call, non_constant_p,
+				   NEAREST_NAMESPACE);
+    case METAFN___REPORT_TOKENS:
+      return eval_report_tokens (loc, ctx, h, kind, non_constant_p, call);
+    case METAFN_QUEUE_INJECTION:
+      return eval_queue_injection (loc, ctx, h, h1, kind1, non_constant_p,
+				   call);
+    case METAFN_NAMESPACE_INJECT:
+      return eval_namespace_inject (loc, ctx, h, h1, kind1, non_constant_p,
+				    call);
     case METAFN_DEFINE_AGGREGATE:
       return eval_define_aggregate (loc, ctx, h, hvec, call, non_constant_p);
     case METAFN_IS_VOID_TYPE:
@@ -9794,6 +9837,238 @@ eval_token_sequence_expr (const constexpr_ctx *ctx, tree t,
     vec_safe_push (out, (*in)[next++]);
 
   return get_reflection_raw (loc, make_token_sequence (out), REFLECT_TOKENS);
+}
+
+/* Return the scope in which the consteval block BLOCK (the operator() of its
+   closure type) appears.  */
+
+static tree
+consteval_block_scope (tree block)
+{
+  tree s = CP_TYPE_CONTEXT (CP_DECL_CONTEXT (block));
+  tree lam;
+  while (TREE_CODE (s) == FUNCTION_DECL
+	 && LAMBDA_FUNCTION_P (s)
+	 && (lam = CLASSTYPE_LAMBDA_EXPR (CP_DECL_CONTEXT (s)))
+	 && LAMBDA_EXPR_CONSTEVAL_BLOCK_P (lam))
+    s = CP_TYPE_CONTEXT (CP_DECL_CONTEXT (s));
+  return s;
+}
+
+/* Return the scope enclosing S.  */
+
+static tree
+enclosing_injection_scope (tree s)
+{
+  if (TYPE_P (s))
+    return CP_TYPE_CONTEXT (s);
+  return CP_DECL_CONTEXT (s);
+}
+
+/* Process std::meta::nearest_token_queuing_context,
+   std::meta::nearest_class_or_namespace and std::meta::nearest_namespace.
+   Returns: a reflection of the innermost function (for
+   nearest_token_queuing_context), class (except for nearest_namespace) or
+   namespace enclosing the consteval block being evaluated, or else the
+   current scope.  Lambda closure types are skipped.  */
+
+static tree
+eval_nearest_context (location_t loc, const constexpr_ctx *ctx, tree call,
+		      bool *non_constant_p, nearest_context_kind kind)
+{
+  tree s;
+  if (tree block = cxx_constexpr_consteval_block (ctx))
+    s = consteval_block_scope (block);
+  else
+    {
+      static const char *const names[] = {
+	"std::meta::nearest_token_queuing_context",
+	"std::meta::nearest_class_or_namespace",
+	"std::meta::nearest_namespace"
+      };
+      s = reflect_current_scope (loc, ctx, call, non_constant_p, names[kind]);
+      if (*non_constant_p)
+	return call;
+    }
+  while (TREE_CODE (s) != NAMESPACE_DECL)
+    {
+      if (TREE_CODE (s) == FUNCTION_DECL
+	  ? kind == NEAREST_TOKEN_QUEUING_CONTEXT
+	  : (TYPE_P (s) && kind != NEAREST_NAMESPACE && !LAMBDA_TYPE_P (s)))
+	break;
+      s = enclosing_injection_scope (s);
+    }
+  return get_reflection_raw (loc, s);
+}
+
+/* Return true if the metafunction being evaluated in CTX is called from
+   a function in namespace std::meta, such as the one-argument overloads of
+   std::meta::queue_injection.  */
+
+static bool
+called_from_meta_p (const constexpr_ctx *ctx)
+{
+  tree caller = cxx_constexpr_caller (ctx);
+  return caller && CP_DECL_CONTEXT (caller) == std_meta_node;
+}
+
+/* Check that the evaluation in CTX can inject tokens for the metafunction
+   NAME, and that TOKENS (of KIND) is a token sequence.  Return the consteval
+   block being evaluated, or NULL_TREE after a diagnostic.  */
+
+static tree
+check_injection (location_t loc, const constexpr_ctx *ctx, const char *name,
+		 reflect_kind kind, bool *non_constant_p)
+{
+  tree block = cxx_constexpr_consteval_block (ctx);
+  /* Don't point into <meta> when called from its one-argument overloads.  */
+  if (block && called_from_meta_p (ctx))
+    loc = DECL_SOURCE_LOCATION (block);
+  if (block == NULL_TREE)
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "%qs not evaluated from %<consteval%> block", name);
+      *non_constant_p = true;
+      return NULL_TREE;
+    }
+  if (kind != REFLECT_TOKENS)
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "%qs called with a reflection that is not a token "
+		  "sequence", name);
+      *non_constant_p = true;
+      return NULL_TREE;
+    }
+  if (current_instantiation ())
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	sorry_at (DECL_SOURCE_LOCATION (block), "token injection from a "
+		  "%<consteval%> block in a template instantiation");
+      *non_constant_p = true;
+      return NULL_TREE;
+    }
+  if (!cp_parser_injection_possible_p ())
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "cannot inject tokens while parsing tentatively");
+      *non_constant_p = true;
+      return NULL_TREE;
+    }
+  return block;
+}
+
+/* Process std::meta::queue_injection.
+   Requests that the token sequence TOKENS be injected into TARGET, a
+   namespace, a class being defined or a function whose body is being
+   parsed that encloses the consteval block being evaluated, once the
+   parser gets back to that scope.  */
+
+static tree
+eval_queue_injection (location_t loc, const constexpr_ctx *ctx, tree target,
+		      tree tokens, reflect_kind tokens_kind,
+		      bool *non_constant_p, tree call)
+{
+  tree block = check_injection (loc, ctx, "std::meta::queue_injection",
+				tokens_kind, non_constant_p);
+  if (block == NULL_TREE)
+    return call;
+
+  if (TREE_CODE (target) == NAMESPACE_DECL)
+    target = ORIGINAL_NAMESPACE (target);
+  bool ok = false;
+  if (TREE_CODE (target) == NAMESPACE_DECL
+      || CLASS_TYPE_P (target)
+      || TREE_CODE (target) == FUNCTION_DECL)
+    for (tree s = consteval_block_scope (block); ;
+	 s = enclosing_injection_scope (s))
+      {
+	if (s == target
+	    || (TYPE_P (s) && TYPE_P (target)
+		&& TYPE_MAIN_VARIANT (s) == TYPE_MAIN_VARIANT (target)))
+	  {
+	    ok = true;
+	    break;
+	  }
+	if (s == global_namespace)
+	  break;
+      }
+  if (ok && TYPE_P (target))
+    ok = (TYPE_BEING_DEFINED (target)
+	  && currently_open_class (target) != NULL_TREE);
+  if (!ok)
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "cannot inject tokens into %qE: it is not a namespace, "
+		  "class or function whose body is currently being parsed "
+		  "that encloses the %<consteval%> block",
+		  get_reflection_raw (loc, target));
+      *non_constant_p = true;
+      return call;
+    }
+
+  cp_parser_queue_injection (target, tokens, DECL_SOURCE_LOCATION (block));
+  return void_node;
+}
+
+/* Process std::meta::namespace_inject.
+   Injects the token sequence TOKENS into the namespace NS immediately.  */
+
+static tree
+eval_namespace_inject (location_t loc, const constexpr_ctx *ctx, tree ns,
+		       tree tokens, reflect_kind tokens_kind,
+		       bool *non_constant_p, tree call)
+{
+  tree block = check_injection (loc, ctx, "std::meta::namespace_inject",
+				tokens_kind, non_constant_p);
+  if (block == NULL_TREE)
+    return call;
+
+  if (TREE_CODE (ns) != NAMESPACE_DECL)
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "cannot inject tokens into %qE, which is not "
+		  "a namespace", get_reflection_raw (loc, ns));
+      *non_constant_p = true;
+      return call;
+    }
+  ns = ORIGINAL_NAMESPACE (ns);
+
+  if (!cp_parser_namespace_inject (ns, tokens, DECL_SOURCE_LOCATION (block)))
+    {
+      /* The errors have been reported.  */
+      *non_constant_p = true;
+      return call;
+    }
+  return void_node;
+}
+
+/* Process std::meta::__report_tokens.
+   Reports the tokens of TOKENS with a warning, when evaluated from
+   a consteval block.  */
+
+static tree
+eval_report_tokens (location_t loc, const constexpr_ctx *ctx, tree tokens,
+		    reflect_kind kind, bool *non_constant_p, tree call)
+{
+  tree block = cxx_constexpr_consteval_block (ctx);
+  if (block && called_from_meta_p (ctx))
+    loc = DECL_SOURCE_LOCATION (block);
+  if (kind != REFLECT_TOKENS)
+    {
+      if (!cxx_constexpr_quiet_p (ctx))
+	error_at (loc, "%qs called with a reflection that is not a token "
+		  "sequence", "std::meta::__report_tokens");
+      *non_constant_p = true;
+      return call;
+    }
+  if (block)
+    {
+      pretty_printer pp;
+      token_sequence_spelling (&pp, tokens);
+      warning_at (DECL_SOURCE_LOCATION (block), 0, "token sequence: %s",
+		  pp_formatted_text (&pp));
+    }
+  return void_node;
 }
 
 /* Process std::meta::is_token_sequence.
