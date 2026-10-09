@@ -9203,7 +9203,8 @@ extern tree digest_init_flags			(tree, tree, int, tsubst_flags_t);
 extern tree digest_nsdmi_init		        (tree, tree, tsubst_flags_t);
 extern tree build_scoped_ref			(tree, tree, tree *);
 extern tree build_x_arrow			(location_t, tree,
-						 tsubst_flags_t);
+						 tsubst_flags_t,
+						 location_t = UNKNOWN_LOCATION);
 extern tree build_m_component_ref		(tree, tree, tsubst_flags_t);
 extern tree build_functional_cast		(location_t, tree, tree,
 						 tsubst_flags_t);
@@ -9560,6 +9561,35 @@ extern void cp_parser_discard_injections (unsigned);
 extern bool cp_parser_injection_possible_p ();
 extern bool cp_parser_namespace_inject (tree, tree, location_t);
 extern tree cp_definition_tokens (tree);
+
+/* The outcome of overload resolution for an operator token of a recorded
+   definition (-ftoken-injection), see cp_operator_resolution.  */
+enum operator_resolution_status {
+  /* The token cannot be an operator of an expression.  */
+  ORS_NOT_OPERATOR,
+  /* The token is not one of a recorded definition.  */
+  ORS_UNAVAILABLE,
+  /* No operator function is called there.  */
+  ORS_BUILTIN,
+  /* The operator is template-dependent.  */
+  ORS_DEPENDENT,
+  /* An operator function was selected.  */
+  ORS_FUNCTION
+};
+
+/* Flags of an operator resolution.  */
+enum {
+  ORF_ADL = 1,		/* The function was found only by ADL.  */
+  ORF_REWRITTEN = 2,	/* The operation was rewritten (C++20).  */
+  ORF_REVERSED = 4	/* The operands were reversed for the rewrite.  */
+};
+
+extern void cp_note_operator_resolution (const op_location_t &, tree, bool,
+					 bool, bool);
+extern void cp_note_dependent_operator (const op_location_t &);
+extern operator_resolution_status cp_operator_resolution (const cp_token *,
+							  tree *,
+							  unsigned *);
 
 /* In reflect.cc */
 extern void init_reflection ();

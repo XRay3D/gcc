@@ -2321,8 +2321,11 @@ build_scoped_ref (tree datum, tree basetype, tree* binfo_p)
    delegation is detected.  */
 
 tree
-build_x_arrow (location_t loc, tree expr, tsubst_flags_t complain)
+build_x_arrow (location_t loc, tree expr, tsubst_flags_t complain,
+	       location_t op_loc)
 {
+  /* The location of the -> token, for -ftoken-injection.  */
+  const op_location_t oloc (op_loc, loc);
   tree orig_expr = expr;
   tree type = TREE_TYPE (expr);
   tree last_rval = NULL_TREE;
@@ -2340,6 +2343,8 @@ build_x_arrow (location_t loc, tree expr, tsubst_flags_t complain)
 	/* Pointer to current instantiation, don't treat as dependent.  */;
       else if (type_dependent_expression_p (expr))
 	{
+	  if (flag_token_injection)
+	    cp_note_dependent_operator (oloc);
 	  expr = build_min_nt_loc (loc, ARROW_EXPR, expr);
 	  TREE_TYPE (expr) = ttype;
 	  return expr;
@@ -2351,7 +2356,7 @@ build_x_arrow (location_t loc, tree expr, tsubst_flags_t complain)
       struct tinst_level *actual_inst = current_instantiation ();
       tree fn = NULL;
 
-      while ((expr = build_new_op (loc, COMPONENT_REF,
+      while ((expr = build_new_op (oloc, COMPONENT_REF,
 				   LOOKUP_NORMAL, expr, NULL_TREE, NULL_TREE,
 				   NULL_TREE, &fn, complain)))
 	{

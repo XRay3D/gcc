@@ -654,6 +654,13 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     // and for definitions with the [[gnu::retain_tokens]] attribute.
     consteval info definition_tokens_of(info);
 
+    // The outcome of overload resolution for an operator token of
+    // a recorded definition.
+    consteval info resolved_operator_of(info);
+    consteval bool is_resolved_through_adl(info);
+    consteval bool is_rewritten_operator(info);
+    consteval bool has_reversed_operands(info);
+
     // Accumulates a token sequence in which the pieces added with += are
     // separated by the given separator, a comma by default.
     struct list_builder

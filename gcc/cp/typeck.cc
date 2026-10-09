@@ -5026,6 +5026,8 @@ build_x_binary_op (const op_location_t &loc, enum tree_code code, tree arg1,
       if (type_dependent_expression_p (arg1)
 	  || type_dependent_expression_p (arg2))
 	{
+	  if (flag_token_injection)
+	    cp_note_dependent_operator (loc);
 	  expr = build_min_nt_loc (loc, code, arg1, arg2);
 	  TREE_TYPE (expr)
 	    = build_dependent_operator_type (lookups, code, false);
@@ -5082,8 +5084,12 @@ build_x_array_ref (location_t loc, tree arg1, tree arg2,
     {
       if (type_dependent_expression_p (arg1)
 	  || type_dependent_expression_p (arg2))
-	return build_min_nt_loc (loc, ARRAY_REF, arg1, arg2,
-				 NULL_TREE, NULL_TREE);
+	{
+	  if (flag_token_injection)
+	    cp_note_dependent_operator (loc);
+	  return build_min_nt_loc (loc, ARRAY_REF, arg1, arg2,
+				   NULL_TREE, NULL_TREE);
+	}
     }
 
   expr = build_new_op (loc, ARRAY_REF, LOOKUP_NORMAL, arg1, arg2,
@@ -7223,6 +7229,8 @@ build_x_unary_op (location_t loc, enum tree_code code, cp_expr xarg,
     {
       if (type_dependent_expression_p (xarg))
 	{
+	  if (flag_token_injection)
+	    cp_note_dependent_operator (loc);
 	  tree e = build_min_nt_loc (loc, code, xarg.get_value (), NULL_TREE);
 	  TREE_TYPE (e) = build_dependent_operator_type (lookups, code, false);
 	  return e;

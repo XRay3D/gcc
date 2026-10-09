@@ -5897,6 +5897,181 @@ definition_tokens_wanted_p (tree entity)
   return false;
 }
 
+/* Operator resolutions (-ftoken-injection).
+
+   While a recorded definition is parsed, the outcome of overload
+   resolution for each of its operators is noted, keyed by the location of
+   the operator token, for std::meta::resolved_operator_of.  The tokens
+   copied by definition_tokens_of, tokens_of and interpolation keep their
+   locations, so the outcome can be found from any copy.  */
+
+/* An outcome of overload resolution for an operator.  */
+
+struct operator_resolution {
+  /* The FUNCTION_DECL selected, or NULL_TREE if the operator is
+     template-dependent.  */
+  tree fn;
+  /* ORF_* flags.  */
+  unsigned flags;
+};
+
+/* Map from the location of an operator token to the outcome.  */
+static hash_map<location_hash, operator_resolution> *operator_resolutions;
+
+/* The functions in operator_resolutions, to keep them alive.  */
+static GTY(()) vec<tree, va_gc> *operator_resolution_fns;
+
+/* The locations of the tokens of recorded definitions that can be
+   operators of an expression.  */
+static hash_set<location_hash> *recorded_operator_tokens;
+
+/* Return the key for the operator token at LOC.  */
+
+static location_t
+operator_resolution_key (location_t loc)
+{
+  return get_pure_location (line_table, loc);
+}
+
+/* Return the key for the operator at LOC.  */
+
+static location_t
+operator_resolution_key (const op_location_t &loc)
+{
+  location_t l = loc.m_operator_loc;
+  if (l == UNKNOWN_LOCATION)
+    l = loc.m_combined_loc;
+  return operator_resolution_key (l);
+}
+
+/* Return true if TOKEN can be (the first token of) an operator of an
+   expression whose meaning overload resolution can determine.  */
+
+static bool
+operator_token_p (const cp_token *token)
+{
+  switch ((int) token->type)
+    {
+    case CPP_KEYWORD:
+      return (token->keyword == RID_NEW
+	      || token->keyword == RID_DELETE
+	      || token->keyword == RID_CO_AWAIT);
+    case CPP_PLUS: case CPP_MINUS: case CPP_MULT: case CPP_DIV:
+    case CPP_MOD: case CPP_XOR: case CPP_AND: case CPP_OR:
+    case CPP_COMPL: case CPP_NOT: case CPP_EQ: case CPP_LESS:
+    case CPP_GREATER: case CPP_PLUS_EQ: case CPP_MINUS_EQ: case CPP_MULT_EQ:
+    case CPP_DIV_EQ: case CPP_MOD_EQ: case CPP_XOR_EQ: case CPP_AND_EQ:
+    case CPP_OR_EQ: case CPP_LSHIFT: case CPP_RSHIFT: case CPP_LSHIFT_EQ:
+    case CPP_RSHIFT_EQ: case CPP_EQ_EQ: case CPP_NOT_EQ: case CPP_LESS_EQ:
+    case CPP_GREATER_EQ: case CPP_SPACESHIP: case CPP_AND_AND:
+    case CPP_OR_OR: case CPP_PLUS_PLUS: case CPP_MINUS_MINUS: case CPP_COMMA:
+    case CPP_DEREF_STAR: case CPP_DEREF: case CPP_OPEN_PAREN:
+    case CPP_OPEN_SQUARE: case CPP_QUERY:
+      return true;
+    default:
+      return false;
+    }
+}
+
+/* Return true if the outcome of overload resolution should be noted now:
+   while a recorded definition is parsed, not while a template is
+   instantiated.  */
+
+static bool
+noting_operator_resolutions_p ()
+{
+  return (flag_token_injection
+	  && definition_recording_depth > 0
+	  && current_instantiation () == NULL);
+}
+
+/* Return true if the operator function FN would not be found by ordinary
+   unqualified lookup at this point, only by argument-dependent lookup.  */
+
+static bool
+found_only_by_adl_p (tree fn)
+{
+  if (DECL_FUNCTION_MEMBER_P (fn))
+    return false;
+  tree tmpl = (DECL_LANG_SPECIFIC (fn) && DECL_TEMPLATE_INFO (fn)
+	       ? DECL_TI_TEMPLATE (fn) : NULL_TREE);
+  tree fns = lookup_name (DECL_NAME (fn), LOOK_where::BLOCK_NAMESPACE);
+  if (fns && fns != error_mark_node && OVL_P (fns))
+    for (lkp_iterator iter (fns); iter; ++iter)
+      if (*iter == fn || (tmpl && *iter == tmpl))
+	return false;
+  return true;
+}
+
+/* Note that overload resolution selected the operator function FN for the
+   operator at LOC, a rewritten candidate if REWRITTEN (with reversed
+   operands if REVERSED).  If KEEP_EXISTING, an earlier outcome for the same
+   operator is kept (for the chain of operator-> calls).  */
+
+void
+cp_note_operator_resolution (const op_location_t &loc, tree fn,
+			     bool rewritten, bool reversed,
+			     bool keep_existing)
+{
+  if (!noting_operator_resolutions_p ())
+    return;
+  location_t key = operator_resolution_key (loc);
+  if (key == UNKNOWN_LOCATION)
+    return;
+  if (!operator_resolutions)
+    operator_resolutions = new hash_map<location_hash, operator_resolution>;
+  if (keep_existing && operator_resolutions->get (key))
+    return;
+  operator_resolution r;
+  r.fn = fn;
+  r.flags = ((found_only_by_adl_p (fn) ? ORF_ADL : 0)
+	     | (rewritten ? ORF_REWRITTEN : 0)
+	     | (reversed ? ORF_REVERSED : 0));
+  operator_resolutions->put (key, r);
+  vec_safe_push (operator_resolution_fns, fn);
+}
+
+/* Note that the operator at LOC is template-dependent.  */
+
+void
+cp_note_dependent_operator (const op_location_t &loc)
+{
+  if (!noting_operator_resolutions_p ())
+    return;
+  location_t key = operator_resolution_key (loc);
+  if (key == UNKNOWN_LOCATION)
+    return;
+  if (!operator_resolutions)
+    operator_resolutions = new hash_map<location_hash, operator_resolution>;
+  operator_resolution r = { NULL_TREE, 0 };
+  operator_resolutions->put (key, r);
+}
+
+/* Return the outcome of overload resolution for TOKEN, setting *FN and
+   *FLAGS for ORS_FUNCTION.  */
+
+operator_resolution_status
+cp_operator_resolution (const cp_token *token, tree *fn, unsigned *flags)
+{
+  *fn = NULL_TREE;
+  *flags = 0;
+  location_t key = operator_resolution_key (token->location);
+  if (operator_resolutions)
+    if (operator_resolution *r = operator_resolutions->get (key))
+      {
+	if (r->fn == NULL_TREE)
+	  return ORS_DEPENDENT;
+	*fn = r->fn;
+	*flags = r->flags;
+	return ORS_FUNCTION;
+      }
+  if (!operator_token_p (token))
+    return ORS_NOT_OPERATOR;
+  if (recorded_operator_tokens && recorded_operator_tokens->contains (key))
+    return ORS_BUILTIN;
+  return ORS_UNAVAILABLE;
+}
+
 /* Record the tokens [FIRST, LAST) as the tokens of the definition of
    ENTITY.  Purged tokens and pragmas are left out.  */
 
@@ -5915,6 +6090,12 @@ record_definition_tokens (tree entity, cp_token *first, cp_token *last)
 	  continue;
 	}
       vec_safe_push (toks, *p);
+      if (operator_token_p (p))
+	{
+	  if (!recorded_operator_tokens)
+	    recorded_operator_tokens = new hash_set<location_hash>;
+	  recorded_operator_tokens->add (operator_resolution_key (p->location));
+	}
     }
   tree key = definition_tokens_key (entity);
   if (!definition_tokens_map)
@@ -10075,8 +10256,14 @@ cp_parser_postfix_dot_deref_expression (cp_parser *parser,
 
   /* If this is a `->' operator, dereference the pointer.  */
   if (token_type == CPP_DEREF)
-    postfix_expression = build_x_arrow (location, postfix_expression,
-					tf_warning_or_error);
+    {
+      /* The location of the `->' token, which has just been consumed.  */
+      cp_token *prev = cp_lexer_previous_token (parser->lexer);
+      location_t op_loc = (prev->type == CPP_DEREF ? prev->location
+			   : UNKNOWN_LOCATION);
+      postfix_expression = build_x_arrow (location, postfix_expression,
+					  tf_warning_or_error, op_loc);
+    }
   /* Check to see whether or not the expression is type-dependent and
      not the current instantiation.  */
   dependent_p = type_dependent_object_expression_p (postfix_expression);

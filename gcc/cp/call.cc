@@ -7525,6 +7525,13 @@ build_new_op (const op_location_t &loc, enum tree_code code, int flags,
 	}
       else if (TREE_CODE (cand->fn) == FUNCTION_DECL)
 	{
+	  /* -ftoken-injection: note the outcome for
+	     std::meta::resolved_operator_of, but not for the comparison of
+	     the result of operator<=> with 0 in a rewritten expression.  */
+	  if (flag_token_injection && !(flags & LOOKUP_REWRITTEN))
+	    cp_note_operator_resolution (loc, cand->fn, cand->rewritten (),
+					 cand->reversed (),
+					 /*keep_existing=*/code == COMPONENT_REF);
 	  if (overload)
 	    {
 	      if (cand->rewritten ())

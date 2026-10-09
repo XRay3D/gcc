@@ -450,6 +450,10 @@ static tree eval_token_location_of (location_t, const constexpr_ctx *, tree,
 static tree eval_definition_tokens_of (location_t, const constexpr_ctx *,
 				       tree, reflect_kind, bool *, tree *,
 				       tree);
+static tree eval_resolved_operator_of (location_t, const constexpr_ctx *,
+				       tree, reflect_kind, bool *, tree *,
+				       tree);
+static tree eval_operator_resolution_flag (tree, reflect_kind, unsigned);
 static tree reflect_current_scope (location_t, const constexpr_ctx *, tree,
 				   bool *, const char *);
 
@@ -8521,6 +8525,15 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
     case METAFN_DEFINITION_TOKENS_OF:
       return eval_definition_tokens_of (loc, ctx, h, kind, non_constant_p,
 					jump_target, fun);
+    case METAFN_RESOLVED_OPERATOR_OF:
+      return eval_resolved_operator_of (loc, ctx, h, kind, non_constant_p,
+					jump_target, fun);
+    case METAFN_IS_RESOLVED_THROUGH_ADL:
+      return eval_operator_resolution_flag (h, kind, ORF_ADL);
+    case METAFN_IS_REWRITTEN_OPERATOR:
+      return eval_operator_resolution_flag (h, kind, ORF_REWRITTEN);
+    case METAFN_HAS_REVERSED_OPERANDS:
+      return eval_operator_resolution_flag (h, kind, ORF_REVERSED);
     case METAFN_DEFINE_AGGREGATE:
       return eval_define_aggregate (loc, ctx, h, hvec, call, non_constant_p);
     case METAFN_IS_VOID_TYPE:
@@ -10687,6 +10700,70 @@ eval_definition_tokens_of (location_t loc, const constexpr_ctx *ctx,
 			    "with -fdefinition-tokens or with the retain_tokens "
 			    "attribute", fun, non_constant_p, jump_target);
   return get_reflection_raw (loc, ts, REFLECT_TOKENS);
+}
+
+/* Process std::meta::resolved_operator_of.
+   Returns: for an operator token of a definition whose tokens are recorded
+   (obtained with definition_tokens_of, possibly through tokens_of or
+   interpolation), a reflection of the operator function that overload
+   resolution selected for it; if no operator function is called there (a
+   built-in operator, or a token that is not an operator of an expression),
+   r itself.
+   Throws: meta::exception unless r represents a non-empty token sequence,
+   if the first token is an operator token that does not come from a
+   recorded definition, or if the operator is template-dependent.  */
+
+static tree
+eval_resolved_operator_of (location_t loc, const constexpr_ctx *ctx, tree r,
+			   reflect_kind kind, bool *non_constant_p,
+			   tree *jump_target, tree fun)
+{
+  vec<cp_token, va_gc> *toks
+    = get_token_sequence_tokens (loc, ctx, r, kind, true, non_constant_p,
+				 jump_target, fun);
+  if (*jump_target || *non_constant_p)
+    return NULL_TREE;
+  tree fn;
+  unsigned flags;
+  switch (cp_operator_resolution (&(*toks)[0], &fn, &flags))
+    {
+    case ORS_FUNCTION:
+      return get_reflection_raw (loc, fn);
+    case ORS_DEPENDENT:
+      return throw_exception (loc, ctx, "the operator is template-dependent; "
+			      "its resolution is known only in an "
+			      "instantiation", fun, non_constant_p,
+			      jump_target);
+    case ORS_UNAVAILABLE:
+      return throw_exception (loc, ctx, "the resolution of the operator is "
+			      "not available; it is known only for the tokens "
+			      "of a recorded definition", fun, non_constant_p,
+			      jump_target);
+    case ORS_NOT_OPERATOR:
+    case ORS_BUILTIN:
+      break;
+    }
+  return get_reflection_raw (loc, r, REFLECT_TOKENS);
+}
+
+/* Process std::meta::is_resolved_through_adl,
+   std::meta::is_rewritten_operator and std::meta::has_reversed_operands.
+   Returns: true if r represents a token sequence whose first token is an
+   operator for which overload resolution selected an operator function with
+   the property FLAG.  Otherwise, false.  */
+
+static tree
+eval_operator_resolution_flag (tree r, reflect_kind kind, unsigned flag)
+{
+  if (kind != REFLECT_TOKENS || vec_safe_is_empty (TOKEN_SEQUENCE_TOKENS (r)))
+    return boolean_false_node;
+  tree fn;
+  unsigned flags;
+  if (cp_operator_resolution (&(*TOKEN_SEQUENCE_TOKENS (r))[0], &fn, &flags)
+      == ORS_FUNCTION
+      && (flags & flag))
+    return boolean_true_node;
+  return boolean_false_node;
 }
 
 /* Process std::meta::is_token_sequence.
