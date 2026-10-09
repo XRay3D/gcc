@@ -626,6 +626,25 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     namespace_inject(info __tokens)
     { namespace_inject(nearest_namespace(), __tokens); }
 
+    // Examining token sequences (an extension to P3294, as in EDG).
+    // The token_*_of functions describe the first element of a sequence.
+    enum class token_kind {
+      identifier,
+      keyword,
+      punctuator,
+      integer_literal,
+      floating_literal,
+      character_literal,
+      string_literal,
+      boolean_literal,
+      user_defined_literal,
+      interpolated,
+      operator_function_id
+    };
+
+    consteval vector<info> tokens_of(info);
+    consteval token_kind token_kind_of(info);
+
     // Accumulates a token sequence in which the pieces added with += are
     // separated by the given separator, a comma by default.
     struct list_builder

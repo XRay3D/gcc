@@ -5832,7 +5832,7 @@ cp_parser_namespace_inject (tree ns, tree tokens, location_t loc)
       while (!cp_lexer_next_token_is (parser->lexer, CPP_EOF))
 	cp_lexer_consume_token (parser->lexer);
     }
-  else if (errorcount > errors)
+  else if (errorcount > active_injections->last ().errors)
     inform (loc, "in token sequence injected here");
 
   active_injections->pop ();

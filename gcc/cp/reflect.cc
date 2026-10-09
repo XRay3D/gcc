@@ -434,6 +434,10 @@ static tree eval_namespace_inject (location_t, const constexpr_ctx *, tree,
 				   tree, reflect_kind, bool *, tree);
 static tree eval_report_tokens (location_t, const constexpr_ctx *, tree,
 				reflect_kind, bool *, tree);
+static tree eval_tokens_of (location_t, const constexpr_ctx *, tree,
+			    reflect_kind, bool *, tree *, tree);
+static tree eval_token_kind_of (location_t, const constexpr_ctx *, tree,
+				reflect_kind, bool *, tree *, tree, tree);
 static tree reflect_current_scope (location_t, const constexpr_ctx *, tree,
 				   bool *, const char *);
 
@@ -7997,6 +8001,11 @@ check_metafn_return_type (location_t loc, metafn_kind_ret kind, tree type,
       if (!VOID_TYPE_P (type))
 	expected = void_type_node;
       break;
+    case METAFN_KIND_RET_TOKEN_KIND:
+      if (TREE_CODE (type) != ENUMERAL_TYPE
+	  || TYPE_CONTEXT (type) != std_meta_node)
+	expected_str = "std::meta::token_kind";
+      break;
     }
   if (expected || expected_str)
     {
@@ -8448,6 +8457,12 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
     case METAFN_NAMESPACE_INJECT:
       return eval_namespace_inject (loc, ctx, h, h1, kind1, non_constant_p,
 				    call);
+    case METAFN_TOKENS_OF:
+      return eval_tokens_of (loc, ctx, h, kind, non_constant_p, jump_target,
+			     fun);
+    case METAFN_TOKEN_KIND_OF:
+      return eval_token_kind_of (loc, ctx, h, kind, non_constant_p,
+				 jump_target, rettype, fun);
     case METAFN_DEFINE_AGGREGATE:
       return eval_define_aggregate (loc, ctx, h, hvec, call, non_constant_p);
     case METAFN_IS_VOID_TYPE:
@@ -10069,6 +10084,180 @@ eval_report_tokens (location_t loc, const constexpr_ctx *ctx, tree tokens,
 		  pp_formatted_text (&pp));
     }
   return void_node;
+}
+
+/* The enumerators of std::meta::token_kind.  */
+
+enum meta_token_kind {
+  MTK_IDENTIFIER,
+  MTK_KEYWORD,
+  MTK_PUNCTUATOR,
+  MTK_INTEGER_LITERAL,
+  MTK_FLOATING_LITERAL,
+  MTK_CHARACTER_LITERAL,
+  MTK_STRING_LITERAL,
+  MTK_BOOLEAN_LITERAL,
+  MTK_USER_DEFINED_LITERAL,
+  MTK_INTERPOLATED,
+  MTK_OPERATOR_FUNCTION_ID
+};
+
+/* Return the number of tokens of the first element of the token sequence
+   TOKS starting at index I, in the sense of std::meta::tokens_of.  */
+
+static unsigned
+token_element_length (vec<cp_token, va_gc> *toks, unsigned i)
+{
+  gcc_checking_assert (i < vec_safe_length (toks));
+  return 1;
+}
+
+/* Classify TOKEN for std::meta::token_kind_of.  */
+
+static meta_token_kind
+classify_token (const cp_token *token)
+{
+  switch ((int) token->type)
+    {
+    case CPP_TOKEN_VALUE:
+      return MTK_INTERPOLATED;
+
+    case CPP_NAME:
+      return MTK_IDENTIFIER;
+
+    case CPP_KEYWORD:
+      if (token->keyword == RID_TRUE || token->keyword == RID_FALSE)
+	return MTK_BOOLEAN_LITERAL;
+      return MTK_KEYWORD;
+
+    case CPP_NUMBER:
+      switch (TREE_CODE (token->u.value))
+	{
+	case USERDEF_LITERAL:
+	  return MTK_USER_DEFINED_LITERAL;
+	case REAL_CST:
+	case FIXED_CST:
+	  return MTK_FLOATING_LITERAL;
+	case EXCESS_PRECISION_EXPR:
+	  return MTK_FLOATING_LITERAL;
+	default:
+	  return MTK_INTEGER_LITERAL;
+	}
+
+    case CPP_CHAR:
+    case CPP_WCHAR:
+    case CPP_CHAR16:
+    case CPP_CHAR32:
+    case CPP_UTF8CHAR:
+      return MTK_CHARACTER_LITERAL;
+
+    case CPP_STRING:
+    case CPP_WSTRING:
+    case CPP_STRING16:
+    case CPP_STRING32:
+    case CPP_UTF8STRING:
+      return MTK_STRING_LITERAL;
+
+    case CPP_CHAR_USERDEF:
+    case CPP_WCHAR_USERDEF:
+    case CPP_CHAR16_USERDEF:
+    case CPP_CHAR32_USERDEF:
+    case CPP_UTF8CHAR_USERDEF:
+    case CPP_STRING_USERDEF:
+    case CPP_WSTRING_USERDEF:
+    case CPP_STRING16_USERDEF:
+    case CPP_STRING32_USERDEF:
+    case CPP_UTF8STRING_USERDEF:
+      return MTK_USER_DEFINED_LITERAL;
+
+    default:
+      /* Operators and punctuators, including the alternative tokens such
+	 as bitor.  */
+      return MTK_PUNCTUATOR;
+    }
+}
+
+/* Return the tokens of the token sequence reflected by R of KIND, or throw
+   std::meta::exception (from FUN) if R does not reflect a token sequence or,
+   if NONEMPTY, if it is empty.  Returns NULL and sets *JUMP_TARGET or
+   *NON_CONSTANT_P on failure.  */
+
+static vec<cp_token, va_gc> *
+get_token_sequence_tokens (location_t loc, const constexpr_ctx *ctx, tree r,
+			   reflect_kind kind, bool nonempty,
+			   bool *non_constant_p, tree *jump_target, tree fun)
+{
+  if (kind != REFLECT_TOKENS)
+    {
+      throw_exception (loc, ctx, "reflection does not represent a token "
+		       "sequence", fun, non_constant_p, jump_target);
+      return NULL;
+    }
+  vec<cp_token, va_gc> *toks = TOKEN_SEQUENCE_TOKENS (r);
+  if (nonempty && vec_safe_is_empty (toks))
+    {
+      throw_exception (loc, ctx, "token sequence is empty", fun,
+		       non_constant_p, jump_target);
+      return NULL;
+    }
+  return toks;
+}
+
+/* Process std::meta::tokens_of.
+   Returns: a vector with one element per token of the token sequence
+   reflected by r, each a token sequence holding that token (an
+   operator-function-id is a single element).
+   Throws: meta::exception unless r represents a token sequence.  */
+
+static tree
+eval_tokens_of (location_t loc, const constexpr_ctx *ctx, tree r,
+		reflect_kind kind, bool *non_constant_p, tree *jump_target,
+		tree fun)
+{
+  vec<cp_token, va_gc> *toks
+    = get_token_sequence_tokens (loc, ctx, r, kind, false, non_constant_p,
+				 jump_target, fun);
+  if (*jump_target || *non_constant_p)
+    return NULL_TREE;
+  vec<constructor_elt, va_gc> *elts = nullptr;
+  for (unsigned i = 0; i < vec_safe_length (toks); )
+    {
+      unsigned n = token_element_length (toks, i);
+      vec<cp_token, va_gc> *elt = NULL;
+      vec_alloc (elt, n);
+      for (unsigned j = 0; j < n; ++j)
+	elt->quick_push ((*toks)[i + j]);
+      CONSTRUCTOR_APPEND_ELT (elts, NULL_TREE,
+			      get_reflection_raw (loc,
+						  make_token_sequence (elt),
+						  REFLECT_TOKENS));
+      i += n;
+    }
+  return get_vector_of_info_elts (elts);
+}
+
+/* Process std::meta::token_kind_of.
+   Returns: the kind of the first element of the token sequence reflected
+   by r.
+   Throws: meta::exception unless r represents a non-empty token
+   sequence.  */
+
+static tree
+eval_token_kind_of (location_t loc, const constexpr_ctx *ctx, tree r,
+		    reflect_kind kind, bool *non_constant_p, tree *jump_target,
+		    tree ret_type, tree fun)
+{
+  vec<cp_token, va_gc> *toks
+    = get_token_sequence_tokens (loc, ctx, r, kind, true, non_constant_p,
+				 jump_target, fun);
+  if (*jump_target || *non_constant_p)
+    return NULL_TREE;
+  meta_token_kind k;
+  if (token_element_length (toks, 0) > 1)
+    k = MTK_OPERATOR_FUNCTION_ID;
+  else
+    k = classify_token (&(*toks)[0]);
+  return build_int_cst (ret_type, k);
 }
 
 /* Process std::meta::is_token_sequence.
