@@ -441,6 +441,8 @@ static tree eval_token_kind_of (location_t, const constexpr_ctx *, tree,
 static tree eval_token_spelling_of (location_t, const constexpr_ctx *, tree,
 				    reflect_kind, bool *, tree *, tree, tree,
 				    tree);
+static tree eval_token_value_of (location_t, const constexpr_ctx *, tree,
+				 reflect_kind, bool *, tree *, tree);
 static tree reflect_current_scope (location_t, const constexpr_ctx *, tree,
 				   bool *, const char *);
 
@@ -8477,6 +8479,9 @@ process_metafunction (const constexpr_ctx *ctx, tree fun, tree call,
       return eval_token_spelling_of (loc, ctx, h, kind, non_constant_p,
 				     jump_target, char8_type_node, rettype,
 				     fun);
+    case METAFN_TOKEN_VALUE_OF:
+      return eval_token_value_of (loc, ctx, h, kind, non_constant_p,
+				  jump_target, fun);
     case METAFN_DEFINE_AGGREGATE:
       return eval_define_aggregate (loc, ctx, h, hvec, call, non_constant_p);
     case METAFN_IS_VOID_TYPE:
@@ -10308,6 +10313,153 @@ eval_token_spelling_of (location_t loc, const constexpr_ctx *ctx, tree r,
 					&args, ret_type, LOOKUP_NORMAL,
 					tf_warning_or_error);
   return build_cplus_new (ret_type, ret, tf_warning_or_error);
+}
+
+/* Return the STRING_CST for the string-literal token TOK (without the
+   ud-suffix of a user-defined string literal), or error_mark_node.  */
+
+static tree
+string_literal_token_value (const cp_token *tok)
+{
+  tree s = tok->u.value;
+  cpp_ttype type = tok->type;
+  if (cpp_userdef_string_p (type))
+    {
+      s = USERDEF_LITERAL_VALUE (s);
+      type = cpp_userdef_string_remove_type (type);
+    }
+  cpp_string str, istr;
+  str.text = (const unsigned char *) TREE_STRING_POINTER (s);
+  str.len = TREE_STRING_LENGTH (s);
+  if (!cpp_interpret_string (parse_in, &str, 1, &istr, type))
+    return error_mark_node;
+  tree value = build_string (istr.len, (const char *) istr.text);
+  free (const_cast<unsigned char *> (istr.text));
+  switch (type)
+    {
+    default:
+      TREE_TYPE (value) = char_array_type_node;
+      break;
+    case CPP_UTF8STRING:
+      TREE_TYPE (value) = (flag_char8_t ? char8_array_type_node
+			   : char_array_type_node);
+      break;
+    case CPP_STRING16:
+      TREE_TYPE (value) = char16_array_type_node;
+      break;
+    case CPP_STRING32:
+      TREE_TYPE (value) = char32_array_type_node;
+      break;
+    case CPP_WSTRING:
+      TREE_TYPE (value) = wchar_array_type_node;
+      break;
+    }
+  return fix_string_type (value);
+}
+
+/* Return a reflection of the constant V, as std::meta::reflect_constant
+   would.  */
+
+static tree
+reflect_token_constant (location_t loc, tree v)
+{
+  tree conv = convert_reflect_constant_arg (cv_unqualified (TREE_TYPE (v)), v);
+  if (conv == error_mark_node)
+    return error_mark_node;
+  return get_reflection_raw (loc, conv, get_reflection_kind (conv));
+}
+
+/* Process std::meta::token_value_of.
+   Returns: a reflection of the value of the first token of the token
+   sequence reflected by r: for an interpolated reflection, that reflection;
+   for another interpolated value, true or false, or a literal, a reflection
+   of that value as a constant (for a string literal, of the string literal
+   object; for a user-defined literal, of the value without the ud-suffix).
+   Throws: meta::exception unless r represents a token sequence whose first
+   token is a literal or interpolated.  */
+
+static tree
+eval_token_value_of (location_t loc, const constexpr_ctx *ctx, tree r,
+		     reflect_kind kind, bool *non_constant_p, tree *jump_target,
+		     tree fun)
+{
+  vec<cp_token, va_gc> *toks
+    = get_token_sequence_tokens (loc, ctx, r, kind, true, non_constant_p,
+				 jump_target, fun);
+  if (*jump_target || *non_constant_p)
+    return NULL_TREE;
+
+  const cp_token *tok = &(*toks)[0];
+  tree v = tok->u.value;
+  tree ret = NULL_TREE;
+  switch (token_element_length (toks, 0) > 1
+	  ? MTK_OPERATOR_FUNCTION_ID : classify_token (tok))
+    {
+    case MTK_INTERPOLATED:
+      if (REFLECT_EXPR_P (v))
+	return v;
+      ret = reflect_token_constant (loc, v);
+      break;
+
+    case MTK_BOOLEAN_LITERAL:
+      ret = reflect_token_constant (loc, tok->keyword == RID_TRUE
+				    ? boolean_true_node : boolean_false_node);
+      break;
+
+    case MTK_INTEGER_LITERAL:
+    case MTK_FLOATING_LITERAL:
+    case MTK_CHARACTER_LITERAL:
+      if (TREE_CODE (v) == EXCESS_PRECISION_EXPR)
+	v = TREE_OPERAND (v, 0);
+      if (TREE_CODE (v) == FIXED_CST || v == error_mark_node)
+	break;
+      ret = reflect_token_constant (loc, v);
+      break;
+
+    case MTK_USER_DEFINED_LITERAL:
+      if (cpp_userdef_string_p (tok->type))
+	goto string;
+      v = USERDEF_LITERAL_VALUE (v);
+      if (TREE_CODE (v) == EXCESS_PRECISION_EXPR)
+	v = TREE_OPERAND (v, 0);
+      if (TREE_CODE (v) == FIXED_CST || v == error_mark_node)
+	break;
+      ret = reflect_token_constant (loc, v);
+      break;
+
+    case MTK_STRING_LITERAL:
+    string:
+      v = string_literal_token_value (tok);
+      if (v != error_mark_node)
+	{
+	  /* The string literal object, as for reflect_constant_string.  */
+	  tree decl = get_template_parm_object (v,
+						mangle_template_parm_object (v));
+	  DECL_MERGEABLE (decl) = 1;
+	  return get_reflection_raw (loc, decl);
+	}
+      break;
+
+    case MTK_IDENTIFIER:
+      return throw_exception (loc, ctx, "the token is an identifier, which "
+			      "has no value", fun, non_constant_p,
+			      jump_target);
+    case MTK_KEYWORD:
+      return throw_exception (loc, ctx, "the token is a keyword, which has "
+			      "no value", fun, non_constant_p, jump_target);
+    case MTK_PUNCTUATOR:
+      return throw_exception (loc, ctx, "the token is a punctuator, which "
+			      "has no value", fun, non_constant_p,
+			      jump_target);
+    case MTK_OPERATOR_FUNCTION_ID:
+      return throw_exception (loc, ctx, "the token is an "
+			      "operator-function-id, which has no value", fun,
+			      non_constant_p, jump_target);
+    }
+  if (ret == NULL_TREE || ret == error_mark_node)
+    return throw_exception (loc, ctx, "the value of the literal cannot be "
+			    "computed", fun, non_constant_p, jump_target);
+  return ret;
 }
 
 /* Process std::meta::is_token_sequence.
