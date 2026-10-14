@@ -43,7 +43,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "toplev.h"
 #include "contracts.h"
 
-static bool verify_constant (tree, bool, bool *, bool *);
+static inline bool verify_constant (tree, bool, bool *, bool *);
 #define VERIFY_CONSTANT(X)						\
 do {									\
   if (verify_constant ((X), ctx->quiet, non_constant_p, overflow_p)) \
@@ -5452,8 +5452,8 @@ verify_constant_explain_r (tree *tp, int *walk_subtrees, void *)
    variable that might be dereferenced later.  */
 
 static bool
-verify_constant (tree t, bool allow_non_constant, bool *non_constant_p,
-		 bool *overflow_p)
+verify_constant_1 (tree t, bool allow_non_constant, bool *non_constant_p,
+		   bool *overflow_p)
 {
   if (!*non_constant_p && !reduced_constant_expression_p (t)
       && t != void_node)
@@ -5481,6 +5481,19 @@ verify_constant (tree t, bool allow_non_constant, bool *non_constant_p,
       *overflow_p = true;
     }
   return *non_constant_p;
+}
+
+/* Like verify_constant_1, but quick for an INTEGER_CST, the most common
+   case.  */
+
+static inline bool
+verify_constant (tree t, bool allow_non_constant, bool *non_constant_p,
+		 bool *overflow_p)
+{
+  if (TREE_CODE (t) == INTEGER_CST && !TREE_OVERFLOW (t))
+    return *non_constant_p;
+  return verify_constant_1 (t, allow_non_constant, non_constant_p,
+			    overflow_p);
 }
 
 /* Check whether the shift operation with code CODE and type TYPE on LHS
@@ -9784,16 +9797,15 @@ merge_jump_target (location_t loc, const constexpr_ctx *ctx, tree r,
   return r;
 }
 
-/* Attempt to reduce the expression T to a constant value.
-   On failure, issue diagnostic and return error_mark_node.  */
+/* Subroutine of cxx_eval_constant_expression, which see.  */
 /* FIXME unify with c_fully_fold */
 /* FIXME overflow_p is too global */
 
-tree
-cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
-			      value_cat lval,
-			      bool *non_constant_p, bool *overflow_p,
-			      tree *jump_target)
+static tree
+cxx_eval_constant_expression_1 (const constexpr_ctx *ctx, tree t,
+				value_cat lval,
+				bool *non_constant_p, bool *overflow_p,
+				tree *jump_target)
 {
   if (*jump_target)
     {
@@ -11382,6 +11394,26 @@ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
     return t;
   else
     return r;
+}
+
+/* Attempt to reduce the expression T to a constant value.
+   On failure, issue diagnostic and return error_mark_node.  */
+
+tree
+cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
+			      value_cat lval,
+			      bool *non_constant_p, bool *overflow_p,
+			      tree *jump_target)
+{
+  /* Many operands are constants already; return them without the setup
+     of cxx_eval_constant_expression_1, which would do the same.  */
+  if (CONSTANT_CLASS_P (t)
+      && !*jump_target
+      && !TREE_OVERFLOW (t)
+      && !(TREE_CODE (t) == INTEGER_CST && TYPE_PTR_P (TREE_TYPE (t))))
+    return t;
+  return cxx_eval_constant_expression_1 (ctx, t, lval, non_constant_p,
+					 overflow_p, jump_target);
 }
 
 /* P0859: A function is needed for constant evaluation if it is a constexpr
