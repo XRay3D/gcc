@@ -8280,6 +8280,10 @@ cxx_eval_indirect_ref (const constexpr_ctx *ctx, tree t,
       return t;
     }
 
+  /* An ARRAY_REF that cxx_fold_indirect_ref built for the value of the
+     operand, which nothing keeps once the value of the element is known.  */
+  tree fresh_ref = NULL_TREE;
+
   /* First try to simplify it directly.  */
   tree r = cxx_fold_indirect_ref (ctx, EXPR_LOCATION (t), TREE_TYPE (t),
 				  orig_op0, &empty_base, jump_target);
@@ -8309,6 +8313,18 @@ cxx_eval_indirect_ref (const constexpr_ctx *ctx, tree t,
 				 &empty_base, jump_target);
       if (*jump_target)
 	return NULL_TREE;
+      if (r && !lval && TREE_CODE (r) == ARRAY_REF)
+	{
+	  tree addr = op0;
+	  STRIP_NOPS (addr);
+	  if (TREE_CODE (addr) == POINTER_PLUS_EXPR)
+	    {
+	      addr = TREE_OPERAND (addr, 0);
+	      STRIP_NOPS (addr);
+	    }
+	  if (TREE_CODE (addr) == ADDR_EXPR && TREE_OPERAND (addr, 0) != r)
+	    fresh_ref = r;
+	}
       if (r == NULL_TREE)
 	{
 	  /* We couldn't fold to a constant value.  Make sure it's not
@@ -8353,6 +8369,8 @@ cxx_eval_indirect_ref (const constexpr_ctx *ctx, tree t,
   r = cxx_eval_constant_expression (ctx, r,
 				    lval, non_constant_p, overflow_p,
 				    jump_target);
+  if (fresh_ref && r != fresh_ref)
+    ggc_free (fresh_ref);
   if (*jump_target)
     return NULL_TREE;
   if (*non_constant_p)
