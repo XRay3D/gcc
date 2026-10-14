@@ -11228,6 +11228,14 @@ cxx_eval_constant_expression_1 (const constexpr_ctx *ctx, tree t,
 	  r = sop;
 	else if (tcode == UNARY_PLUS_EXPR)
 	  r = fold_convert (TREE_TYPE (t), op);
+	else if (TYPE_REF_P (type)
+		 && TREE_CODE (op) == POINTER_PLUS_EXPR
+		 && TREE_CODE (TREE_OPERAND (op, 1)) == INTEGER_CST)
+	  /* Binding a reference to an element of an array, e.g. to *(p + i)
+	     for a const T& parameter.  The folder would push the conversion
+	     into the POINTER_PLUS_EXPR, building it again; just wrap it, the
+	     uses of the reference look through the conversion.  */
+	  r = build1 (tcode, type, op);
 	else
 	  r = fold_build1 (tcode, type, op);
 
