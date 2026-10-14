@@ -7845,6 +7845,27 @@ cxx_eval_vec_init (const constexpr_ctx *ctx, tree t,
     return r;
 }
 
+/* The results of same_type_ignoring_tlq_and_bounds_p for some pairs of
+   types, valid during the outermost constant evaluation that was started
+   last: no garbage is collected meanwhile, so the types stay alive.  The
+   evaluation of a conversion asks it for the same few pairs of types
+   millions of times, and the answer requires building the unqualified
+   variants of both types.  */
+
+struct same_type_cache_entry
+{
+  tree type1, type2;
+  unsigned generation;
+  bool same;
+};
+
+static same_type_cache_entry same_type_cache[256];
+
+/* Incremented by each outermost constant evaluation, which makes the
+   entries of the previous evaluations stale.  */
+
+static unsigned same_type_cache_generation = 1;
+
 /* Like same_type_ignoring_top_level_qualifiers_p, but also handle the case
    where the desired type is an array of unknown bounds because the variable
    has had its bounds deduced since the wrapping expression was created.  */
@@ -7852,6 +7873,18 @@ cxx_eval_vec_init (const constexpr_ctx *ctx, tree t,
 static bool
 same_type_ignoring_tlq_and_bounds_p (tree type1, tree type2)
 {
+  if (type1 == type2)
+    return true;
+  same_type_cache_entry &e
+    = same_type_cache[(((uintptr_t) type1 >> 4) ^ ((uintptr_t) type2 >> 3))
+		      % ARRAY_SIZE (same_type_cache)];
+  if (e.generation == same_type_cache_generation
+      && e.type1 == type1
+      && e.type2 == type2)
+    return e.same;
+  e.type1 = type1;
+  e.type2 = type2;
+  e.generation = same_type_cache_generation;
   while (TREE_CODE (type1) == ARRAY_TYPE
 	 && TREE_CODE (type2) == ARRAY_TYPE
 	 && (!TYPE_DOMAIN (type1) || !TYPE_DOMAIN (type2)))
@@ -7859,7 +7892,8 @@ same_type_ignoring_tlq_and_bounds_p (tree type1, tree type2)
       type1 = TREE_TYPE (type1);
       type2 = TREE_TYPE (type2);
     }
-  return same_type_ignoring_top_level_qualifiers_p (type1, type2);
+  e.same = same_type_ignoring_top_level_qualifiers_p (type1, type2);
+  return e.same;
 }
 
 /* Try to determine the currently active union member for an expression
@@ -11645,6 +11679,13 @@ cxx_eval_outermost_constant_expr (tree t, bool allow_non_constant,
     {
       gcc_checking_assert (allow_non_constant);
       return t;
+    }
+
+  /* Garbage might have been collected since the last evaluation.  */
+  if (++same_type_cache_generation == 0)
+    {
+      memset (same_type_cache, 0, sizeof same_type_cache);
+      same_type_cache_generation = 1;
     }
 
   constexpr_global_ctx global_ctx;
