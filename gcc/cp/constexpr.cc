@@ -5670,6 +5670,32 @@ cxx_fold_pointer_plus_expression (const constexpr_ctx *ctx, tree t,
   return NULL_TREE;
 }
 
+/* If the value P of a pointer is the address of an array variable plus a
+   constant offset, (T *) &A or (T *) &A p+ OFF, return A and set *OFF to
+   the offset in bytes.  Otherwise return NULL_TREE.  */
+
+static tree
+array_base_and_offset (tree p, offset_int *off)
+{
+  STRIP_NOPS (p);
+  *off = 0;
+  if (TREE_CODE (p) == POINTER_PLUS_EXPR)
+    {
+      tree o = TREE_OPERAND (p, 1);
+      if (TREE_CODE (o) != INTEGER_CST)
+	return NULL_TREE;
+      *off = wi::sext (wi::to_offset (o), TYPE_PRECISION (TREE_TYPE (o)));
+      p = TREE_OPERAND (p, 0);
+      STRIP_NOPS (p);
+    }
+  if (TREE_CODE (p) != ADDR_EXPR)
+    return NULL_TREE;
+  tree a = TREE_OPERAND (p, 0);
+  if (!DECL_P (a) || TREE_CODE (TREE_TYPE (a)) != ARRAY_TYPE)
+    return NULL_TREE;
+  return a;
+}
+
 /* Try to fold expressions like
    (struct S *) (&a[0].D.2378 + 12)
    into
@@ -5853,6 +5879,40 @@ cxx_eval_binary_expression (const constexpr_ctx *ctx, tree t,
 	  const bool eq = compare_reflections (lhs, rhs);
 	  r = constant_boolean_node (eq == is_code_eq, type);
 	}
+    }
+  if (r == NULL_TREE
+      && TREE_CODE_CLASS (code) == tcc_comparison
+      && POINTER_TYPE_P (TREE_TYPE (lhs))
+      && POINTER_TYPE_P (TREE_TYPE (rhs)))
+    {
+      /* Pointers into the same array compare like their offsets, which is
+	 what the folder finds out after rewriting both addresses.  */
+      offset_int loff, roff;
+      tree base = array_base_and_offset (lhs, &loff);
+      if (base && base == array_base_and_offset (rhs, &roff))
+	switch (code)
+	  {
+	  case EQ_EXPR:
+	    r = constant_boolean_node (loff == roff, type);
+	    break;
+	  case NE_EXPR:
+	    r = constant_boolean_node (loff != roff, type);
+	    break;
+	  case LT_EXPR:
+	    r = constant_boolean_node (loff < roff, type);
+	    break;
+	  case LE_EXPR:
+	    r = constant_boolean_node (loff <= roff, type);
+	    break;
+	  case GT_EXPR:
+	    r = constant_boolean_node (loff > roff, type);
+	    break;
+	  case GE_EXPR:
+	    r = constant_boolean_node (loff >= roff, type);
+	    break;
+	  default:
+	    break;
+	  }
     }
   if (r == NULL_TREE
       && TREE_CODE_CLASS (code) == tcc_comparison
