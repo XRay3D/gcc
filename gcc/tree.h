@@ -5142,6 +5142,7 @@ extern tree build_method_type (tree, tree);
 extern tree build_offset_type (tree, tree);
 extern tree build_complex_type (tree, bool named = false);
 extern tree array_type_nelts_minus_one (const_tree);
+extern bool array_type_nelts_constant_p (const_tree, unsigned HOST_WIDE_INT *);
 extern tree array_type_nelts_top (tree);
 
 extern tree value_member (tree, tree);

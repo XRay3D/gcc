@@ -9566,8 +9566,13 @@ is_really_empty_class (tree type, bool ignore_vptr)
       return true;
     }
   else if (TREE_CODE (type) == ARRAY_TYPE)
-    return (integer_zerop (array_type_nelts_top (type))
-	    || is_really_empty_class (TREE_TYPE (type), ignore_vptr));
+    {
+      unsigned HOST_WIDE_INT nelts;
+      if (array_type_nelts_constant_p (type, &nelts)
+	  ? nelts == 0 : integer_zerop (array_type_nelts_top (type)))
+	return true;
+      return is_really_empty_class (TREE_TYPE (type), ignore_vptr);
+    }
   return false;
 }
 

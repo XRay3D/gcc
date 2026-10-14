@@ -3896,6 +3896,39 @@ array_type_nelts_minus_one (const_tree type)
 	  : fold_build2 (MINUS_EXPR, TREE_TYPE (max), max, min));
 }
 
+/* Return true if the number of elements of the ARRAY_TYPE TYPE, as
+   array_type_nelts_top computes it, is a constant, and store it in *NELTS.
+   This avoids building trees for the common case of constant bounds,
+   e.g. for each array access in C++ constant evaluation.  */
+
+bool
+array_type_nelts_constant_p (const_tree type, unsigned HOST_WIDE_INT *nelts)
+{
+  tree domain = TYPE_DOMAIN (type);
+  if (!domain)
+    return false;
+  tree min = TYPE_MIN_VALUE (domain);
+  tree max = TYPE_MAX_VALUE (domain);
+  if (!min
+      || !max
+      || TREE_CODE (min) != INTEGER_CST
+      || TREE_CODE (max) != INTEGER_CST
+      || TREE_TYPE (min) != sizetype
+      || TREE_TYPE (max) != sizetype
+      || TREE_OVERFLOW (min)
+      || TREE_OVERFLOW (max)
+      || !wi::leu_p (wi::to_wide (min), wi::to_wide (max)))
+    return false;
+  wide_int nelts_minus_one = wi::to_wide (max) - wi::to_wide (min);
+  /* Leave the zero-length array with MAX one less than MIN modulo the
+     precision to array_type_nelts_top.  */
+  if (wi::eq_p (nelts_minus_one,
+		wi::max_value (TYPE_PRECISION (sizetype), UNSIGNED)))
+    return false;
+  *nelts = nelts_minus_one.to_uhwi () + 1;
+  return true;
+}
+
 /* Return, as an INTEGER_CST node, the number of elements for TYPE
    (which is an ARRAY_TYPE).  This counts only elements of the top
    array.  */
@@ -3903,6 +3936,10 @@ array_type_nelts_minus_one (const_tree type)
 tree
 array_type_nelts_top (tree type)
 {
+  unsigned HOST_WIDE_INT nelts;
+  if (array_type_nelts_constant_p (type, &nelts))
+    return size_int (nelts);
+
   return fold_build2_loc (input_location,
 		      PLUS_EXPR, sizetype,
 		      array_type_nelts_minus_one (type),

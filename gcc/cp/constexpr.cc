@@ -6445,14 +6445,27 @@ eval_and_check_array_index (const constexpr_ctx *ctx,
       return t;
     }
 
-  tree nelts = get_array_or_vector_nelts (ctx, TREE_TYPE (ary), non_constant_p,
-					  overflow_p, jump_target);
-  if (*jump_target)
-    return NULL_TREE;
-  VERIFY_CONSTANT (nelts);
-  if (allow_one_past
-      ? !tree_int_cst_le (index, nelts)
-      : !tree_int_cst_lt (index, nelts))
+  bool in_bounds;
+  unsigned HOST_WIDE_INT cst_nelts;
+  if (TREE_CODE (TREE_TYPE (ary)) == ARRAY_TYPE
+      && array_type_nelts_constant_p (TREE_TYPE (ary), &cst_nelts))
+    /* Avoid building the INTEGER_CST for the number of elements.  */
+    in_bounds = (allow_one_past
+		 ? tree_to_uhwi (index) <= cst_nelts
+		 : tree_to_uhwi (index) < cst_nelts);
+  else
+    {
+      tree nelts = get_array_or_vector_nelts (ctx, TREE_TYPE (ary),
+					      non_constant_p, overflow_p,
+					      jump_target);
+      if (*jump_target)
+	return NULL_TREE;
+      VERIFY_CONSTANT (nelts);
+      in_bounds = (allow_one_past
+		   ? tree_int_cst_le (index, nelts)
+		   : tree_int_cst_lt (index, nelts));
+    }
+  if (!in_bounds)
     {
       diag_array_subscript (loc, ctx, ary, index);
       *non_constant_p = true;
