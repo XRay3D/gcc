@@ -5376,6 +5376,11 @@ ok:
 	CONSTRUCTOR_NO_CLEARING (t) = false;
       return true;
 
+    case INTEGER_CST:
+      /* The most common case, valid for initializer_constant_valid_p too;
+	 answer it without the call.  */
+      return true;
+
     default:
       /* FIXME are we calling this too much?  */
       return initializer_constant_valid_p (t, TREE_TYPE (t)) != NULL_TREE;
