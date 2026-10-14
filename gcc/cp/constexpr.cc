@@ -5702,6 +5702,54 @@ cxx_maybe_fold_addr_pointer_plus (tree t)
   return build1_loc (EXPR_LOCATION (t), ADDR_EXPR, TREE_TYPE (op0), r);
 }
 
+/* Evaluate LHS CODE RHS for the INTEGER_CSTs LHS and RHS, giving the same
+   result as fold_binary_loc but without going through the general folder,
+   for the comparisons and for the arithmetic of TYPE that cannot be
+   ill-formed other than by signed overflow.  Return NULL_TREE in the other
+   cases, and on signed overflow, which the caller leaves to the folder.  */
+
+static tree
+cxx_fold_int_binop (tree_code code, tree type, tree lhs, tree rhs)
+{
+  if (TREE_CODE_CLASS (code) == tcc_comparison)
+    return const_binop (code, type, lhs, rhs);
+  if (TREE_TYPE (lhs) != type
+      || TREE_TYPE (rhs) != type
+      || !INTEGRAL_TYPE_P (type)
+      || TREE_OVERFLOW (lhs)
+      || TREE_OVERFLOW (rhs))
+    return NULL_TREE;
+  signop sgn = TYPE_SIGN (type);
+  wi::overflow_type overflow = wi::OVF_NONE;
+  wide_int res;
+  switch (code)
+    {
+    case PLUS_EXPR:
+      res = wi::add (wi::to_wide (lhs), wi::to_wide (rhs), sgn, &overflow);
+      break;
+    case MINUS_EXPR:
+      res = wi::sub (wi::to_wide (lhs), wi::to_wide (rhs), sgn, &overflow);
+      break;
+    case MULT_EXPR:
+      res = wi::mul (wi::to_wide (lhs), wi::to_wide (rhs), sgn, &overflow);
+      break;
+    case BIT_AND_EXPR:
+      res = wi::bit_and (wi::to_wide (lhs), wi::to_wide (rhs));
+      break;
+    case BIT_IOR_EXPR:
+      res = wi::bit_or (wi::to_wide (lhs), wi::to_wide (rhs));
+      break;
+    case BIT_XOR_EXPR:
+      res = wi::bit_xor (wi::to_wide (lhs), wi::to_wide (rhs));
+      break;
+    default:
+      return NULL_TREE;
+    }
+  if (sgn == SIGNED && overflow)
+    return NULL_TREE;
+  return wide_int_to_tree (type, res);
+}
+
 /* Subroutine of cxx_eval_constant_expression.
    Like cxx_eval_unary_expression, except for binary expressions.  */
 
@@ -5836,6 +5884,11 @@ cxx_eval_binary_expression (const constexpr_ctx *ctx, tree t,
       return cxx_eval_constant_expression (ctx, r, lval, non_constant_p,
 					   overflow_p, jump_target);
     }
+
+  if (r == NULL_TREE
+      && TREE_CODE (lhs) == INTEGER_CST
+      && TREE_CODE (rhs) == INTEGER_CST)
+    r = cxx_fold_int_binop (code, type, lhs, rhs);
 
   if (r == NULL_TREE)
     {
@@ -9203,7 +9256,14 @@ cxx_eval_increment_expression (const constexpr_ctx *ctx, tree t,
 	TREE_OVERFLOW (mod) = false;
     }
   else
-    mod = fold_build2 (inc ? PLUS_EXPR : MINUS_EXPR, type, val, offset);
+    {
+      mod = NULL_TREE;
+      if (TREE_CODE (val) == INTEGER_CST && TREE_CODE (offset) == INTEGER_CST)
+	mod = cxx_fold_int_binop (inc ? PLUS_EXPR : MINUS_EXPR, type, val,
+				  offset);
+      if (mod == NULL_TREE)
+	mod = fold_build2 (inc ? PLUS_EXPR : MINUS_EXPR, type, val, offset);
+    }
   if (!ptr)
     VERIFY_CONSTANT (mod);
 
